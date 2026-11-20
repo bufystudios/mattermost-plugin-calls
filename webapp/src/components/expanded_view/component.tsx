@@ -51,12 +51,15 @@ import {ExpandedIncomingCallContainer} from 'src/components/incoming_calls/expan
 import {LeaveCallMenu} from 'src/components/leave_call_menu';
 import LiveBadge from 'src/components/live_badge';
 import {ReactionStream} from 'src/components/reaction_stream/reaction_stream';
+import ScreenShareQualityLive from 'src/components/screen_share_quality/live_controls';
+import ScreenShareQualityModal from 'src/components/screen_share_quality/modal';
 import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
 import SpeakingSync from 'src/components/use_speaking';
 import {UserVolumeButton} from 'src/components/user_volume_control';
 import {CallAlertConfigs, DEGRADED_CALL_QUALITY_ALERT_WAIT, STORAGE_CALLS_MIRROR_VIDEO_KEY} from 'src/constants';
 import {logDebug, logErr} from 'src/log';
 import {isPushToTalkActive} from 'src/push_to_talk';
+import {type ScreenShareQuality} from 'src/screen_share_quality';
 import {reconcileWatch, startWatching, streamView, type WatchState} from 'src/screen_watch';
 import {
     keyToAction,
@@ -148,6 +151,9 @@ interface Props extends RouteComponentProps {
 
 interface State {
     screenStream: MediaStream | null,
+
+    // The quality picker is open (browser: asked right before the share starts).
+    showQualityPicker: boolean,
     selfVideoStream: MediaStream | null,
     otherVideoStream: MediaStream | null,
     showParticipantsList: boolean,
@@ -318,6 +324,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
         this.emojiButtonRef = React.createRef();
         this.state = {
             screenStream: null,
+            showQualityPicker: false,
             selfVideoStream: null,
             otherVideoStream: null,
             showParticipantsList: false,
@@ -622,19 +629,32 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                 logDebug('desktopAPI.openScreenShareModal');
                 window.desktopAPI.openScreenShareModal();
             } else {
-                const stream = await getScreenStream('', shareAudioWithScreen());
-                if (window.opener && stream) {
-                    window.screenSharingTrackId = stream.getVideoTracks()[0].id;
-                }
-                if (stream) {
-                    await callsClient?.setScreenStream(stream);
-
-                    this.setState({screenStream: stream});
-                    this.setMissingScreenPermissions(false, true);
-                } else {
-                    this.setMissingScreenPermissions(true, true);
-                }
+                // Pick the quality first. The share starts from the picker's Share button, that
+                // click is the user gesture getDisplayMedia needs.
+                this.setState({showQualityPicker: true});
             }
+        }
+    };
+
+    onQualityCancel = () => {
+        this.setState({showQualityPicker: false});
+    };
+
+    onQualityConfirm = async (quality: ScreenShareQuality) => {
+        this.setState({showQualityPicker: false});
+
+        const callsClient = getCallsClient();
+        const stream = await getScreenStream('', shareAudioWithScreen(), quality);
+        if (window.opener && stream) {
+            window.screenSharingTrackId = stream.getVideoTracks()[0].id;
+        }
+        if (stream) {
+            await callsClient?.setScreenStream(stream, quality);
+
+            this.setState({screenStream: stream});
+            this.setMissingScreenPermissions(false, true);
+        } else {
+            this.setMissingScreenPermissions(true, true);
         }
     };
 
@@ -1253,6 +1273,12 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                     />
                     {msg}
                 </span>
+                {isSharing &&
+                    <ScreenShareQualityLive
+                        onDark={true}
+                        getClient={getCallsClient}
+                    />
+                }
                 {!isSharing &&
                     <StreamActions
                         onDark={true}
@@ -1543,6 +1569,12 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                     {!this.isShowingScreenPlayer() && shouldRenderVideoContainer && this.renderVideoContainer()}
 
                     {this.isShowingScreenPlayer() && this.renderScreenSharingPlayer()}
+
+                    <ScreenShareQualityModal
+                        show={this.state.showQualityPicker}
+                        onConfirm={this.onQualityConfirm}
+                        onCancel={this.onQualityCancel}
+                    />
 
                     {this.state.showLiveCaptions &&
                         <LiveCaptionsOverlay>

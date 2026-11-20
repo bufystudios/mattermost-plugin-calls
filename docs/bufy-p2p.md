@@ -3,7 +3,7 @@
 In a call between two people in a DM, audio/video/screen share can be sent
 directly from one participant to the other instead of through the server's SFU.
 This lowers latency and keeps the (small) server out of the media path, which
-matters most for 60 fps / 8 Mbps screen sharing.
+matters most for high frame rate / high bitrate screen sharing.
 
 Everything else keeps going through the plugin as before: joining, call state,
 websocket events (mute, hand raise, reactions, screen on/off, ...), the SFU
@@ -75,9 +75,10 @@ senders (`syncP2PMedia`) and the SFU peer is left alone.
   (the SFU path gets this from its media map).
 - ICE servers are the ones the plugin already gives the client (`ICEServersConfigs`, including TURN credentials).
   There is no extra TURN server: with a symmetric NAT on both sides P2P times out and the call stays on the SFU.
-- Screen share uses the same quality settings as the SFU path: contentHint `motion`, `maintain-framerate`,
-  60 fps, VP8 8 Mbps; AV1 6 Mbps if `EnableAV1` is on and AV1 was negotiated (codec preferences put AV1 first
-  when enabled, then VP8). Camera uses the usual 1 Mbps / 30 fps.
+- Screen share uses the same quality settings as the SFU path, chosen in the share quality picker
+  (resolution, fps, game/text, bitrate; see [`bufy-share-quality.md`](bufy-share-quality.md)). The negotiation default is
+  AV1 when `EnableAV1` is on, then VP8; the sender then switches to H.264 for 1440p and above without renegotiation.
+  Camera uses the usual 1 Mbps / 30 fps.
 
 ## Signaling
 

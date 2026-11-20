@@ -133,6 +133,7 @@ export const STORAGE_CALLS_BLUR_BACKGROUND_KEY = 'calls_blur_background';
 export const STORAGE_CALLS_NOISE_SUPPRESSION_KEY = 'calls_noise_suppression';
 export const STORAGE_CALLS_PUSH_TO_TALK_KEY = 'calls_push_to_talk';
 export const STORAGE_CALLS_USER_VOLUMES_KEY = 'calls_user_volumes';
+export const STORAGE_CALLS_SHARE_QUALITY_KEY = 'calls_share_quality';
 
 // Log buffer size limit
 export const MAX_ACCUMULATED_LOG_SIZE = 1024 * 1024; // 1 MB

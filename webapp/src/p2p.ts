@@ -12,6 +12,14 @@
 import {EventEmitter} from 'events';
 
 import {logDebug, logErr, logInfo, logWarn} from './log';
+import {
+    applyQualityToSender,
+    type CaptureSize,
+    getShareQuality,
+    pickP2PScreenCodec,
+    type ScreenSenderSettings,
+    type ScreenShareQuality,
+} from './screen_share_quality';
 
 // sfu:            media goes through the SFU (default, and whenever P2P is not eligible).
 // p2p-connecting: a P2P connection is being negotiated, media still goes through the SFU.
@@ -57,10 +65,10 @@ export type P2PLocalMedia = {
     screenAudio: MediaStreamTrack | null;
 };
 
+// Camera video encodings. Screen sharing encodings come from the quality picker
+// (see screen_share_quality.ts and P2PController.setScreenQuality).
 export type P2PEncodings = {
     video: RTCRtpEncodingParameters;
-    screenVP8: RTCRtpEncodingParameters;
-    screenAV1: RTCRtpEncodingParameters;
 };
 
 export type P2PConfig = {
@@ -124,6 +132,12 @@ export class P2PController extends EventEmitter {
     private connectTimer: ReturnType<typeof setTimeout> | null = null;
     private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Quality of the local screen share (null = not chosen yet, the stored one is used) and what
+    // was last applied to the screen sender.
+    private screenQuality: ScreenShareQuality | null = null;
+    private screenCapture: Partial<CaptureSize> | null = null;
+    private screenSettings: ScreenSenderSettings | null = null;
+
     constructor(mySessionID: string, cfg: P2PConfig) {
         super();
         this.mySessionID = mySessionID;
@@ -150,6 +164,25 @@ export class P2PController extends EventEmitter {
     public setLocalMedia(media: P2PLocalMedia) {
         this.localMedia = media;
         this.applyLocalMedia();
+    }
+
+    // Sets the quality (and the real capture size) of the local screen share and
+    // applies it right away when connected. Safe to call at any time.
+    public setScreenQuality(quality: ScreenShareQuality | null, captured?: Partial<CaptureSize> | null) {
+        this.screenQuality = quality;
+        this.screenCapture = captured ?? null;
+        if (!quality) {
+            this.screenSettings = null;
+            return;
+        }
+        if (this.state === 'p2p') {
+            this.applySenderParams();
+        }
+    }
+
+    // Settings last applied to the screen sender (bitrate, ...), null when nothing is being sent.
+    public getScreenSendSettings(): ScreenSenderSettings | null {
+        return this.screenSettings;
     }
 
     public handleSignal(signal: P2PSignal) {
@@ -542,6 +575,7 @@ export class P2PController extends EventEmitter {
         ];
 
         let screenOrVideoChanged = false;
+        const replaced: Array<Promise<unknown>> = [];
         for (const [type, track] of map) {
             const sender = this.transceivers[type]?.sender;
             if (!sender || sender.track === track) {
@@ -550,18 +584,26 @@ export class P2PController extends EventEmitter {
             if (type === 'video' || type === 'screen') {
                 screenOrVideoChanged = true;
             }
-            sender.replaceTrack(track).catch((err) => {
+            replaced.push(sender.replaceTrack(track).catch((err) => {
                 logWarn('p2p: failed to replace track', type, err);
-            });
+            }));
         }
 
+        // sender.track only reflects the new track once replaceTrack has settled, and the
+        // sender parameters are applied to the track that is attached.
         if (screenOrVideoChanged && this.state === 'p2p') {
-            this.applySenderParams();
+            Promise.all(replaced).then(() => {
+                if (this.state === 'p2p') {
+                    this.applySenderParams();
+                }
+            });
         }
     }
 
-    // Prefer VP8 (and AV1 when enabled, which is only chosen if both sides support it)
-    // for screen sharing, like the SFU path does.
+    // The negotiation default for screen sharing is AV1 (when enabled and supported by both
+    // sides) then VP8, like the SFU path. The sender then switches codec per share (H.264 for
+    // 1440p and above) in applySenderParams, which needs no renegotiation: all of these are
+    // negotiated, this only decides which one is first.
     private setScreenCodecPreferences() {
         const trx = this.transceivers.screen;
         if (!trx || typeof trx.setCodecPreferences !== 'function' || typeof RTCRtpReceiver === 'undefined' || !RTCRtpReceiver.getCapabilities) {
@@ -594,8 +636,8 @@ export class P2PController extends EventEmitter {
     // Same quality settings as the SFU path. Encodings and degradationPreference
     // are set on the senders once they are negotiated.
     private applySenderParams() {
-        const apply = async (type: 'video' | 'screen') => {
-            const sender = this.transceivers[type]?.sender;
+        const applyVideo = async () => {
+            const sender = this.transceivers.video?.sender;
             if (!sender || !sender.track) {
                 return;
             }
@@ -605,24 +647,42 @@ export class P2PController extends EventEmitter {
                 if (!params.encodings || params.encodings.length === 0) {
                     params.encodings = [{}];
                 }
-
-                let encoding = this.cfg.encodings.video;
-                if (type === 'screen') {
-                    const codec = params.codecs?.[0]?.mimeType?.toLowerCase();
-                    encoding = codec === 'video/av1' ? this.cfg.encodings.screenAV1 : this.cfg.encodings.screenVP8;
-                    params.degradationPreference = 'maintain-framerate';
-                    logInfo('p2p: screen sender codec', codec);
-                }
-                Object.assign(params.encodings[0], encoding);
-
+                Object.assign(params.encodings[0], this.cfg.encodings.video);
                 await sender.setParameters(params);
             } catch (err) {
-                logWarn('p2p: failed to set sender parameters', type, err);
+                logWarn('p2p: failed to set sender parameters', 'video', err);
             }
         };
 
-        apply('video');
-        apply('screen');
+        const applyScreen = async () => {
+            const sender = this.transceivers.screen?.sender;
+            if (!sender || !sender.track) {
+                this.screenSettings = null;
+                return;
+            }
+
+            const quality = this.screenQuality ?? getShareQuality();
+            const captured = this.screenCapture;
+            const settings = await applyQualityToSender(sender, quality, {
+                codec: 'vp8',
+                captured,
+                chooseCodec: (negotiated) => pickP2PScreenCodec({
+                    quality,
+                    captured,
+                    negotiated,
+                    enableAV1: this.cfg.enableAV1,
+                }) as RTCRtpCodecParameters | null,
+            });
+            this.screenSettings = settings;
+            if (settings) {
+                const encoding = sender.getParameters().encodings?.[0] as {codec?: {mimeType?: string}} | undefined;
+                logInfo('p2p: screen sender codec', encoding?.codec?.mimeType ?? sender.getParameters().codecs?.[0]?.mimeType,
+                    'bitrate (Mbps):', settings.bitrateMbps, 'fps:', settings.maxFramerate);
+            }
+        };
+
+        applyVideo();
+        applyScreen();
     }
 
     // Logs the type of the selected candidate pair (host/srflx/relay), useful to

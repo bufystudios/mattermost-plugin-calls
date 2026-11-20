@@ -23,6 +23,7 @@ import {parseSemVer} from 'semver-parser';
 import CallsClient from 'src/client';
 import {STORAGE_CALLS_SHARE_AUDIO_WITH_SCREEN} from 'src/constants';
 import RestClient from 'src/rest_client';
+import {buildDisplayMediaConstraints, buildElectronMandatory, getShareQuality, type ScreenShareQuality} from 'src/screen_share_quality';
 import {CallPostStatus, CallsPostProps} from 'src/types/types';
 import {notificationSounds} from 'src/webapp_globals';
 
@@ -269,14 +270,15 @@ export function stateSortSessions(presenterID: string, considerReaction = false)
     };
 }
 
-export async function getScreenStream(sourceID?: string, withAudio?: boolean): Promise<MediaStream | null> {
-    logDebug(`getScreenStream called with sourceID: ${sourceID}, withAudio: ${withAudio}`);
+export async function getScreenStream(sourceID?: string, withAudio?: boolean, quality?: ScreenShareQuality): Promise<MediaStream | null> {
+    const q = quality ?? getShareQuality();
+    logDebug(`getScreenStream called with sourceID: ${sourceID}, withAudio: ${withAudio}, quality: ${JSON.stringify(q)}`);
     let screenStream: MediaStream | null = null;
 
     if (window.desktop) {
         logDebug('getScreenStream: using Electron getUserMedia');
         try {
-            // electron
+            // electron: legacy Chromium keys, driven by the quality picker.
             const options = {
                 chromeMediaSource: 'desktop',
             } as Record<string, unknown>;
@@ -285,15 +287,7 @@ export async function getScreenStream(sourceID?: string, withAudio?: boolean): P
             }
             screenStream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    mandatory: {
-                        ...options,
-
-                        // Legacy Chromium keys: request up to 60fps / 1440p.
-                        minFrameRate: 30,
-                        maxFrameRate: 60,
-                        maxWidth: 2560,
-                        maxHeight: 1440,
-                    },
+                    mandatory: buildElectronMandatory(q, sourceID),
                 } as Record<string, unknown>,
                 audio: withAudio ? {mandatory: options} as Record<string, unknown> : false,
             });
@@ -306,13 +300,7 @@ export async function getScreenStream(sourceID?: string, withAudio?: boolean): P
         logDebug(`getScreenStream: using browser getDisplayMedia with audio: ${Boolean(withAudio)}`);
         try {
             screenStream = await navigator.mediaDevices.getDisplayMedia({
-
-                // Ask for 60fps and up to 1440p; the browser picks what the source supports.
-                video: {
-                    frameRate: {ideal: 60, max: 60},
-                    width: {ideal: 2560},
-                    height: {ideal: 1440},
-                },
+                video: buildDisplayMediaConstraints(q),
                 audio: Boolean(withAudio),
             });
             logDebug(`getScreenStream: received stream with ${screenStream?.getVideoTracks().length} video tracks and ${screenStream?.getAudioTracks().length} audio tracks`);

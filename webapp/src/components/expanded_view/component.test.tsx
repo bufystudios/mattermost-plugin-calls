@@ -4,7 +4,7 @@
 import type {UserSessionState} from '@mattermost/calls-common/lib/types';
 import type {Channel} from '@mattermost/types/channels';
 import type {UserProfile} from '@mattermost/types/users';
-import {fireEvent, render, screen, within} from '@testing-library/react';
+import {act, fireEvent, render, screen, within} from '@testing-library/react';
 import React from 'react';
 import {createIntl, RawIntlProvider} from 'react-intl';
 import {Provider} from 'react-redux';
@@ -12,6 +12,7 @@ import type {AnyAction} from 'redux';
 import pluginReducer from 'src/reducers';
 import {mockStore} from 'src/testUtils';
 import {CallsConfigDefault} from 'src/types/types';
+import * as utils from 'src/utils';
 
 // The component reads window.ProductApi at module scope for its contextType, so the global has
 // to exist before it is required.
@@ -270,6 +271,64 @@ describe('ExpandedView', () => {
 
             expect(container.querySelector('#screen-player')).not.toBeInTheDocument();
             expect(screen.getByTestId('grid-watch-stream')).toBeInTheDocument();
+        });
+    });
+
+    describe('screen share quality', () => {
+        const mine = () => stubSession('session-1', 'user-id');
+        const theirs = () => stubSession('session-2', calleeID);
+        const stream = {getVideoTracks: () => [{id: 'track-1'}]} as unknown as MediaStream;
+        let getScreenStream: jest.SpyInstance;
+        let setScreenStream: jest.Mock;
+
+        beforeEach(() => {
+            getScreenStream = jest.spyOn(utils, 'getScreenStream').mockResolvedValue(stream);
+            setScreenStream = jest.fn(async () => {});
+            (window.callsClient as unknown as Record<string, unknown>).setScreenStream = setScreenStream;
+            (window.callsClient as unknown as Record<string, unknown>).setScreenQuality = jest.fn();
+            (window.callsClient as unknown as Record<string, unknown>).getScreenQualityInfo = jest.fn(() => null);
+        });
+
+        afterEach(() => {
+            getScreenStream.mockRestore();
+            window.localStorage.clear();
+        });
+
+        test('asks for the quality before capturing, then shares with the confirmed choice', async () => {
+            renderExpandedView([mine(), theirs()]);
+            fireEvent.click(screen.getByLabelText('Start presenting'));
+
+            expect(screen.getByTestId('share-quality-modal')).toBeInTheDocument();
+            expect(getScreenStream).not.toHaveBeenCalled();
+
+            fireEvent.change(screen.getByTestId('share-quality-modal-resolution'), {target: {value: '1440p'}});
+            await act(async () => {
+                fireEvent.click(screen.getByTestId('share-quality-confirm'));
+            });
+
+            const quality = {resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null};
+            expect(getScreenStream).toHaveBeenCalledWith('', expect.any(Boolean), quality);
+            expect(setScreenStream).toHaveBeenCalledWith(stream, quality);
+        });
+
+        test('cancelling the picker does not capture anything', () => {
+            renderExpandedView([mine(), theirs()]);
+            fireEvent.click(screen.getByLabelText('Start presenting'));
+            fireEvent.click(screen.getByTestId('share-quality-cancel'));
+
+            expect(getScreenStream).not.toHaveBeenCalled();
+            expect(screen.queryByTestId('share-quality-modal')).not.toBeInTheDocument();
+        });
+
+        test('the sharer gets the live quality controls on their preview', () => {
+            (window.callsClient as unknown as Record<string, unknown>).getScreenQualityInfo = jest.fn(() => ({
+                quality: {resolution: '1080p', fps: 60, content: 'game', manualBitrateMbps: null},
+                bitrateMbps: 8,
+                captured: {width: 1920, height: 1080},
+            }));
+            renderExpandedView([mine(), theirs()], {screenSharingSession: mine()});
+
+            expect(screen.getByTestId('share-quality-label')).toHaveTextContent('1080p60 \u00b7 8 Mbps');
         });
     });
 });

@@ -125,8 +125,6 @@ describe('P2PController', () => {
             enableAV1: false,
             encodings: {
                 video: {maxBitrate: 1000},
-                screenVP8: {maxBitrate: 8000},
-                screenAV1: {maxBitrate: 6000},
             },
             sendSignal: (to, kind, data) => sent.push({to, kind, data}),
             ...cfg,
@@ -493,37 +491,100 @@ describe('P2PController', () => {
             expect(pcs[0].transceivers[0].sender.track).toBe(voice);
         });
 
-        it('applies the screen sharing quality settings once connected', async () => {
-            const ctrl = newController('a');
+        const connectWithScreen = async (cfg: Partial<P2PConfig> = {}, codecs: any[] = [{mimeType: 'video/VP8'}]) => {
+            const ctrl = newController('a', cfg);
             ctrl.setContext({peerSessionID: 'b', serverMediaNeeded: false});
             await flush();
-            ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
+            const screenSender = pcs[0].transceivers[2].sender;
+            screenSender.getParameters.mockImplementation(() => ({encodings: [{}], codecs}));
+            return {ctrl, screenSender};
+        };
+
+        const goP2P = async (ctrl: P2PController) => {
             ctrl.handleSignal({from: 'b', kind: 'answer', data: {sdp: {type: 'answer', sdp: 'x'}}});
             await flush();
             pcs[0].setConnectionState('connected');
             await flush();
+        };
 
-            const screenSender = pcs[0].transceivers[2].sender;
+        const lastParams = (sender: MockSender) => (sender.setParameters.mock.calls[sender.setParameters.mock.calls.length - 1] as any)[0];
+
+        it('applies the screen sharing quality settings once connected', async () => {
+            const {ctrl, screenSender} = await connectWithScreen();
+            ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
+            await goP2P(ctrl);
+
+            // Default quality (1080p60, game): 8 Mbps VP8, framerate over resolution.
             expect(screenSender.setParameters).toHaveBeenCalledTimes(1);
-            const params = (screenSender.setParameters.mock.calls[0] as any)[0];
+            const params = lastParams(screenSender);
             expect(params.degradationPreference).toBe('maintain-framerate');
-            expect(params.encodings[0].maxBitrate).toBe(8000);
+            expect(params.encodings[0]).toMatchObject({maxBitrate: 8_000_000, maxFramerate: 60, scaleResolutionDownBy: 1});
+            expect(params.encodings[0].codec).toBeUndefined();
         });
 
-        it('uses the AV1 encodings when AV1 was negotiated', async () => {
-            const ctrl = newController('a', {enableAV1: true});
-            ctrl.setContext({peerSessionID: 'b', serverMediaNeeded: false});
-            await flush();
-            const screenSender = pcs[0].transceivers[2].sender;
-            screenSender.getParameters.mockReturnValue({encodings: [{}], codecs: [{mimeType: 'video/AV1'}]});
+        it('uses the AV1 bitrate row when AV1 is enabled and negotiated', async () => {
+            const {ctrl, screenSender} = await connectWithScreen({enableAV1: true}, [{mimeType: 'video/AV1'}, {mimeType: 'video/VP8'}]);
             ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
-            ctrl.handleSignal({from: 'b', kind: 'answer', data: {sdp: {type: 'answer', sdp: 'x'}}});
-            await flush();
-            pcs[0].setConnectionState('connected');
+            await goP2P(ctrl);
+
+            expect(lastParams(screenSender).encodings[0].maxBitrate).toBe(5_600_000);
+        });
+
+        it('switches the sender to H.264 from 1440p up when both sides negotiated it', async () => {
+            const h264 = {mimeType: 'video/H264', sdpFmtpLine: 'packetization-mode=1;profile-level-id=640032'};
+            const {ctrl, screenSender} = await connectWithScreen({enableAV1: true}, [{mimeType: 'video/AV1'}, {mimeType: 'video/VP8'}, h264]);
+            ctrl.setScreenQuality({resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null}, {width: 2560, height: 1440});
+            ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
+            await goP2P(ctrl);
+
+            const params = lastParams(screenSender);
+            expect(params.encodings[0].codec).toBe(h264);
+            expect(params.encodings[0].maxBitrate).toBe(10_800_000);
+        });
+
+        it('falls back to the default codec when H.264 was not negotiated', async () => {
+            const {ctrl, screenSender} = await connectWithScreen({}, [{mimeType: 'video/VP8'}]);
+            ctrl.setScreenQuality({resolution: '4k', fps: 60, content: 'game', manualBitrateMbps: null}, {width: 3840, height: 2160});
+            ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
+            await goP2P(ctrl);
+
+            const params = lastParams(screenSender);
+            expect(params.encodings[0].codec).toBeUndefined();
+            expect(params.encodings[0].maxBitrate).toBe(25_000_000);
+        });
+
+        it('does not use H.264 when the source is smaller than 1440p', async () => {
+            const h264 = {mimeType: 'video/H264', sdpFmtpLine: 'packetization-mode=1;profile-level-id=640032'};
+            const {ctrl, screenSender} = await connectWithScreen({}, [{mimeType: 'video/VP8'}, h264]);
+
+            // 4K was chosen but only 1080p is available: never upscale, encode what is there.
+            ctrl.setScreenQuality({resolution: '4k', fps: 30, content: 'game', manualBitrateMbps: null}, {width: 1920, height: 1080});
+            ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
+            await goP2P(ctrl);
+
+            const params = lastParams(screenSender);
+            expect(params.encodings[0].codec).toBeUndefined();
+            expect(params.encodings[0].maxBitrate).toBe(4_000_000);
+        });
+
+        it('re-applies the quality to the live sender when it changes, and clears the codec override', async () => {
+            const h264 = {mimeType: 'video/H264', sdpFmtpLine: 'packetization-mode=1;profile-level-id=640032'};
+            const {ctrl, screenSender} = await connectWithScreen({}, [{mimeType: 'video/VP8'}, h264]);
+            ctrl.setScreenQuality({resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null}, {width: 2560, height: 1440});
+            ctrl.setLocalMedia({voice: null, video: null, screen: newTrack('video', 's1'), screenAudio: null});
+            await goP2P(ctrl);
+            expect(lastParams(screenSender).encodings[0].codec).toBe(h264);
+
+            // The sender keeps the override that was set before.
+            screenSender.getParameters.mockImplementation(() => ({encodings: [{codec: h264}], codecs: [{mimeType: 'video/VP8'}, h264]}));
+            ctrl.setScreenQuality({resolution: '720p', fps: 30, content: 'text', manualBitrateMbps: 3}, {width: 1280, height: 720});
             await flush();
 
-            const params = (screenSender.setParameters.mock.calls[0] as any)[0];
-            expect(params.encodings[0].maxBitrate).toBe(6000);
+            const params = lastParams(screenSender);
+            expect(params.encodings[0].codec).toBeUndefined();
+            expect(params.encodings[0]).toMatchObject({maxBitrate: 3_000_000, maxFramerate: 30});
+            expect(params.degradationPreference).toBe('maintain-resolution');
+            expect(ctrl.getScreenSendSettings()?.bitrateMbps).toBe(3);
         });
 
         it('emits remote tracks by type only once connected', async () => {

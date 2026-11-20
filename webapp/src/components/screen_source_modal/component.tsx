@@ -9,7 +9,9 @@ import {OverlayTrigger, Tooltip} from 'react-bootstrap';
 import {IntlShape} from 'react-intl';
 import CompassIcon from 'src/components/icons/compassIcon';
 import SpeakerIcon from 'src/components/icons/speaker_icon';
+import ScreenShareQualityPicker from 'src/components/screen_share_quality/picker';
 import {logDebug, logErr} from 'src/log';
+import {getShareQuality, type ScreenShareQuality, setShareQuality} from 'src/screen_share_quality';
 import {getPlatformInfo, sendDesktopEvent, shareAudioWithScreen, shouldRenderDesktopWidget} from 'src/utils';
 
 interface Props {
@@ -22,6 +24,7 @@ interface State {
     sources: DesktopCaptureSource[],
     selected: string,
     shareSystemAudio: boolean,
+    quality: ScreenShareQuality,
 }
 
 export default class ScreenSourceModal extends React.PureComponent<Props, State> {
@@ -51,7 +54,7 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
             border: '1px solid rgba(var(--center-channel-color-rgb), 0.16)',
             boxShadow: '0px 20px 32px rgba(var(--center-channel-color-rgb), 0.12)',
             maxWidth: '832px',
-            maxHeight: '614px',
+            maxHeight: 'min(720px, calc(100vh - 32px))',
         },
         header: {
             position: 'relative',
@@ -97,6 +100,10 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
             width: '100%',
             margin: 0,
         },
+        quality: {
+            width: '100%',
+            padding: '16px 32px',
+        },
         audioToggleContainer: {
             display: 'flex',
             alignItems: 'center',
@@ -115,6 +122,7 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
             sources: [],
             selected: '',
             shareSystemAudio: false,
+            quality: getShareQuality(),
         };
     }
 
@@ -177,7 +185,12 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
     };
 
     private shareScreen = () => {
-        logDebug('ScreenSourceModal.shareScreen', this.state.selected, shareAudioWithScreen(), this.state.shareSystemAudio);
+        const {quality} = this.state;
+        logDebug('ScreenSourceModal.shareScreen', this.state.selected, shareAudioWithScreen(), this.state.shareSystemAudio, JSON.stringify(quality));
+
+        // The call widget (a separate window in the desktop app) reads the choice from
+        // localStorage, which all windows of the origin share, when the share starts.
+        setShareQuality(quality);
 
         if (window.desktopAPI?.shareScreen) {
             logDebug('desktopAPI.shareScreen');
@@ -187,9 +200,10 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
             sendDesktopEvent('calls-widget-share-screen', {
                 sourceID: this.state.selected,
                 withAudio: shareAudioWithScreen() && this.state.shareSystemAudio,
+                quality,
             });
         } else {
-            window.callsClient?.shareScreen(this.state.selected, shareAudioWithScreen());
+            window.callsClient?.shareScreen(this.state.selected, shareAudioWithScreen(), quality);
         }
         this.hide();
     };
@@ -240,6 +254,9 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
 
     componentDidUpdate(prevProps: Props) {
         if (!prevProps.show && this.props.show) {
+            // Start from the last choice.
+            this.setState({quality: getShareQuality()});
+
             const payload = {
                 types: ['window', 'screen'] as Array<'screen' | 'window'>,
                 thumbnailSize: {
@@ -334,6 +351,17 @@ export default class ScreenSourceModal extends React.PureComponent<Props, State>
                             {this.renderAudioToggle()}
                         </label>
                     }
+
+                    <hr style={this.style.divider}/>
+
+                    <div style={this.style.quality as CSSProperties}>
+                        <ScreenShareQualityPicker
+                            compact={true}
+                            idPrefix='share-quality-source'
+                            value={this.state.quality}
+                            onChange={(quality) => this.setState({quality})}
+                        />
+                    </div>
 
                     <hr style={this.style.divider}/>
 

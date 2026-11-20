@@ -96,6 +96,7 @@ import JoinCallWatcher from 'src/components/join_call_watcher';
 import RecordingsFilePreview from 'src/components/recordings_file_preview';
 import {makeSameChannelLinkClickHandler} from 'src/components/same_channel_link_click_handler';
 import AudioDevicesSettingsSection from 'src/components/user_settings/audio_devices_settings_section';
+import ScreenShareQualitySettingsSection from 'src/components/user_settings/screen_share_quality_settings_section';
 import ScreenSharingSettingsSection from 'src/components/user_settings/screen_sharing_settings_section';
 import VideoDevicesSettingsSection from 'src/components/user_settings/video_devices_settings_section';
 import VoiceInputSettingsSection from 'src/components/user_settings/voice_input_settings_section';
@@ -384,6 +385,10 @@ export default class Plugin {
                 {
                     title: 'Voice input settings',
                     component: VoiceInputSettingsSection,
+                },
+                {
+                    title: 'Screen share quality settings',
+                    component: ScreenShareQualitySettingsSection,
                 },
                 {
                     title: 'Screen sharing settings',
@@ -1045,6 +1050,10 @@ export default class Plugin {
                 {
                     title: 'Voice input settings',
                     component: VoiceInputSettingsSection,
+                },
+                {
+                    title: 'Screen share quality settings',
+                    component: ScreenShareQualitySettingsSection,
                 },
                 {
                     title: 'Screen sharing settings',

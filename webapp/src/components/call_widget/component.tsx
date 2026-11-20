@@ -56,6 +56,8 @@ import {RingbackContainer} from 'src/components/incoming_calls/ringback_containe
 import {LeaveCallMenu} from 'src/components/leave_call_menu';
 import LiveBadge from 'src/components/live_badge';
 import {JoinLoadingOverlay, VideoLoadingOverlay} from 'src/components/loading_overlays';
+import ScreenShareQualityLive from 'src/components/screen_share_quality/live_controls';
+import ScreenShareQualityModal from 'src/components/screen_share_quality/modal';
 import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
 import SpeakingSync from 'src/components/use_speaking';
 import {UserVolumeSlider} from 'src/components/user_volume_control';
@@ -68,6 +70,7 @@ import {
 } from 'src/constants';
 import {logDebug, logErr} from 'src/log';
 import {isPushToTalkActive} from 'src/push_to_talk';
+import {type ScreenShareQuality} from 'src/screen_share_quality';
 import {reconcileWatch, startWatching, streamView, type WatchState} from 'src/screen_watch';
 import {
     keyToAction,
@@ -175,6 +178,9 @@ interface State {
     showMenu: boolean,
     showParticipantsList: boolean,
     screenStream: MediaStream | null,
+
+    // The quality picker is open (browser: asked right before the share starts).
+    showQualityPicker: boolean,
 
     // Session of the share the user chose to watch (click-to-watch, see src/screen_watch.ts).
     watchingScreen: WatchState,
@@ -348,6 +354,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
             audioEls: [],
             alerts: CallAlertStatesDefault,
             screenStream: null,
+            showQualityPicker: false,
             watchingScreen: null,
             volumeUserID: null,
             removeConfirmation: null,
@@ -432,7 +439,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
             logDebug('screen permissions error');
             this.setMissingScreenPermissions(true, true);
         } else if (ev.data.type === 'calls-widget-share-screen') {
-            this.shareScreen(ev.data.message.sourceID, ev.data.message.withAudio);
+            this.shareScreen(ev.data.message.sourceID, ev.data.message.withAudio, ev.data.message.quality);
         }
     };
 
@@ -845,9 +852,11 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         this.setState({showMenu: false});
     };
 
-    private shareScreen = async (sourceID: string, withAudio: boolean) => {
+    // quality: the picker's choice; without it the last stored choice is used (the desktop
+    // app picker runs in another window and stores its choice).
+    private shareScreen = async (sourceID: string, withAudio: boolean, quality?: ScreenShareQuality) => {
         logDebug(`CallWidget.shareScreen called with sourceID: ${sourceID}, withAudio: ${withAudio}`);
-        const stream = await window.callsClient?.shareScreen(sourceID, withAudio);
+        const stream = await window.callsClient?.shareScreen(sourceID, withAudio, quality);
         if (stream) {
             logDebug(`CallWidget.shareScreen: stream received with ${stream.getVideoTracks().length} video tracks and ${stream.getAudioTracks().length} audio tracks`);
             this.setState({screenStream: stream});
@@ -959,7 +968,9 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                     this.props.showScreenSourceModal();
                 }
             } else {
-                await this.shareScreen('', shareAudioWithScreen());
+                // Browser: pick the quality first, the share starts from the picker's Share button
+                // (that click is the user gesture getDisplayMedia needs).
+                state.showQualityPicker = true;
             }
         }
 
@@ -1115,6 +1126,37 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         this.setState({
             removeConfirmation: null,
         });
+    };
+
+    onQualityConfirm = (quality: ScreenShareQuality) => {
+        this.setState({showQualityPicker: false});
+        this.shareScreen('', shareAudioWithScreen(), quality);
+    };
+
+    onQualityCancel = () => {
+        this.setState({showQualityPicker: false});
+    };
+
+    // The quality in use on the sharer's own preview, changeable without sharing again.
+    renderShareQualityLive = () => {
+        const isSharing = Boolean(this.props.screenSharingSession) && this.props.screenSharingSession?.session_id === this.props.currentSession?.session_id;
+        if (!isSharing) {
+            return null;
+        }
+
+        return (
+            <div
+                className='Menu'
+                style={{display: 'flex', position: 'relative', zIndex: 1000}}
+            >
+                <ul
+                    className='Menu__content dropdown-menu'
+                    style={this.style.screenSharingPanel}
+                >
+                    <ScreenShareQualityLive getClient={() => window.callsClient}/>
+                </ul>
+            </div>
+        );
     };
 
     renderScreenSharingPanel = () => {
@@ -2611,6 +2653,12 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                         />
                     }
                     {this.props.allowScreenSharing && this.renderScreenSharingPanel()}
+                    {this.props.allowScreenSharing && this.renderShareQualityLive()}
+                    <ScreenShareQualityModal
+                        show={this.state.showQualityPicker}
+                        onConfirm={this.onQualityConfirm}
+                        onCancel={this.onQualityCancel}
+                    />
                     {this.renderVolumePanel()}
                     {this.state.showParticipantsList &&
                         <ParticipantsList

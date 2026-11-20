@@ -23,6 +23,20 @@ import {
 } from 'src/constants';
 import {type BgBlurData, getBgBlurData} from 'src/local_storage';
 import Segmenter from 'src/segmenter';
+import {
+    applyContentHint,
+    applyQualityToSender,
+    buildLiveConstraints,
+    type CaptureSize,
+    getShareQuality,
+    normalizeShareQuality,
+    resolveBitrateMbps,
+    type ScreenShareQuality,
+    screenEncoding,
+    screenSenderSettings,
+    setShareQuality,
+    type ShareCodec,
+} from 'src/screen_share_quality';
 import {SpeakingMonitor} from 'src/speaking';
 import {getNoiseSuppression} from 'src/voice_input_prefs';
 
@@ -52,10 +66,11 @@ export const DefaultVideoTrackOptions: MediaTrackConstraints = {
 
 const rtcMonitorInterval = 10000;
 
-// Screen sharing encodings (high quality). VP8 is the fallback track and is
-// sent alongside AV1, so AV1 gets a lower cap (it is more efficient).
-const screenEncodingsVP8 = {maxBitrate: 8_000_000, maxFramerate: 60, scaleResolutionDownBy: 1.0};
-const screenEncodingsAV1 = {maxBitrate: 6_000_000, maxFramerate: 60, scaleResolutionDownBy: 1.0};
+export type ScreenQualityInfo = {
+    quality: ScreenShareQuality;
+    bitrateMbps: number;
+    captured: CaptureSize | null;
+};
 
 export default class CallsClient extends EventEmitter {
     public channelID: string;
@@ -63,6 +78,9 @@ export default class CallsClient extends EventEmitter {
     private peer: RTCPeer | null;
     public ws: WebSocketClient | null;
     private localScreenTrack: MediaStreamTrack | null = null;
+
+    // Quality of the current (or last requested) screen share, see screen_share_quality.ts.
+    private screenQuality: ScreenShareQuality | null = null;
     public localVideoStream: MediaStream | null = null;
     private remoteScreenTrack: MediaStreamTrack | null = null;
     private remoteVoiceTracks: MediaStreamTrack[];
@@ -692,8 +710,6 @@ export default class CallsClient extends EventEmitter {
             enableAV1: this.config.enableAV1,
             encodings: {
                 video: this.defaultVideoTrackEncodings[0],
-                screenVP8: screenEncodingsVP8,
-                screenAV1: screenEncodingsAV1,
             },
             sendSignal: (to, kind, data) => {
                 // Compressed like SDP data since the offer can be large.
@@ -963,6 +979,7 @@ export default class CallsClient extends EventEmitter {
         this.removeAllListeners('remoteScreenStream');
         this.removeAllListeners('speaking');
         this.removeAllListeners('localScreenStream');
+        this.removeAllListeners('screenQuality');
         this.removeAllListeners('localVideoStream');
         this.removeAllListeners('devicechange');
         this.removeAllListeners('devicefallback');
@@ -1294,13 +1311,18 @@ export default class CallsClient extends EventEmitter {
         return tracks;
     }
 
-    public async setScreenStream(screenStream: MediaStream) {
+    public async setScreenStream(screenStream: MediaStream, quality?: ScreenShareQuality) {
         if (!this.ws || !this.peer || this.localScreenTrack || !screenStream) {
             return;
         }
 
         const screenTrack = screenStream.getVideoTracks()[0];
         this.localScreenTrack = screenTrack;
+
+        // The picker's choice (or the last stored one) decides content hint, bitrate and codec.
+        const shareQuality = quality ? normalizeShareQuality(quality) : getShareQuality();
+        this.screenQuality = shareQuality;
+        this.p2p?.setScreenQuality(shareQuality, this.getScreenCaptureSize());
 
         const screenAudioTrack = screenStream.getAudioTracks()[0];
 
@@ -1324,6 +1346,8 @@ export default class CallsClient extends EventEmitter {
             this.localScreenTrack = null;
             this.localScreenAudioTrack = null;
             this.localScreenStream = null;
+            this.screenQuality = null;
+            this.p2p?.setScreenQuality(null);
             this.syncP2PMedia();
 
             if (!this.ws || !this.peer) {
@@ -1348,6 +1372,7 @@ export default class CallsClient extends EventEmitter {
         logDebug(`adding screen stream to peer: ${screenStream.id}`);
 
         this.emit('localScreenStream', screenStream);
+        this.emitScreenQuality();
 
         this.ws.send('screen_on', {
             data: JSON.stringify({
@@ -1355,8 +1380,8 @@ export default class CallsClient extends EventEmitter {
             }),
         });
 
-        // Smoothness over text sharpness: we mostly share game footage.
-        screenTrack.contentHint = 'motion';
+        // Game: smoothness over sharpness. Text: sharpness over smoothness.
+        applyContentHint(screenTrack, shareQuality.content);
 
         // When the media goes peer to peer the screen is sent through the P2P
         // connection instead and only added to the SFU peer if we fall back.
@@ -1373,12 +1398,15 @@ export default class CallsClient extends EventEmitter {
 
         this.screenOnSFU = true;
 
+        const quality = this.screenQuality ?? getShareQuality();
+        const captured = this.getScreenCaptureSize();
+
         // Always send a fallback track (VP8 encoded) for receivers that don't yet support AV1.
         // addStream maps opts by getTracks() index, and Chromium lists audio
         // tracks before video, so build opts per track instead of assuming index 0.
         // Without explicit encodings calls-common caps screen tracks at 1Mbps/10fps.
         await this.peer.addStream(screenStream, screenStream.getTracks().map((t) => (
-            t.kind === 'video' ? {encodings: [{...screenEncodingsVP8}]} : undefined
+            t.kind === 'video' ? {encodings: [screenEncoding(screenSenderSettings(quality, 'vp8', captured))]} : undefined
         )) as Parameters<RTCPeer['addStream']>[1]);
 
         if (this.config.enableAV1 && this.av1Codec) {
@@ -1386,41 +1414,127 @@ export default class CallsClient extends EventEmitter {
 
             await this.peer.addTrack(screenTrack, screenStream, {
                 codec: this.av1Codec,
-                encodings: [{...screenEncodingsAV1}],
+                encodings: [screenEncoding(screenSenderSettings(quality, 'av1', captured))],
             });
         }
 
         await this.applyScreenSenderParams(screenTrack.id);
     }
 
-    // sendEncodings cannot carry degradationPreference, so it is set on the
-    // senders after they are created. RTCPeer keeps its senders in a private
-    // map keyed by track id, hence the cast.
+    // sendEncodings cannot carry degradationPreference, so the whole quality is applied
+    // to the senders after they are created (and again on every live change). RTCPeer
+    // keeps its senders in a private map keyed by track id, hence the cast. The
+    // first sender carries the VP8 fallback, the second one (if any) AV1 (see sendScreenOverSFU).
     private async applyScreenSenderParams(trackID: string) {
         const senders = (this.peer as unknown as {senders?: Record<string, RTCRtpSender[]>} | null)?.senders?.[trackID] ?? [];
-        for (const sender of senders) {
-            try {
-                const params = sender.getParameters();
-                params.degradationPreference = 'maintain-framerate';
-                // eslint-disable-next-line no-await-in-loop
-                await sender.setParameters(params);
-            } catch (err) {
-                logWarn('failed to set screen sender parameters', err);
-            }
+        const quality = this.screenQuality ?? getShareQuality();
+        const captured = this.getScreenCaptureSize();
+        const codecs: ShareCodec[] = ['vp8', 'av1'];
+        for (let i = 0; i < senders.length; i++) {
+            // eslint-disable-next-line no-await-in-loop
+            await applyQualityToSender(senders[i], quality, {codec: codecs[i] ?? 'vp8', captured});
         }
     }
 
-    public async shareScreen(sourceID?: string, withAudio?: boolean) {
+    // Size of the screen capture as reported by the track, null when unknown.
+    private getScreenCaptureSize(): CaptureSize | null {
+        const settings = this.localScreenTrack?.getSettings?.();
+        if (settings?.width && settings?.height) {
+            return {width: settings.width, height: settings.height};
+        }
+        return null;
+    }
+
+    // The quality of the share that is going on, as shown on the sharer's preview:
+    // the chosen settings, the bitrate in use and the real capture size.
+    public getScreenQualityInfo(): ScreenQualityInfo | null {
+        if (!this.localScreenTrack || !this.screenQuality) {
+            return null;
+        }
+        const captured = this.getScreenCaptureSize();
+        const p2pSettings = this.p2pActive ? this.p2p?.getScreenSendSettings() : null;
+        return {
+            quality: this.screenQuality,
+            bitrateMbps: p2pSettings?.bitrateMbps ?? resolveBitrateMbps(this.screenQuality, 'vp8', captured),
+            captured,
+        };
+    }
+
+    private emitScreenQuality() {
+        const info = this.getScreenQualityInfo();
+        if (info) {
+            this.emit('screenQuality', info);
+        }
+    }
+
+    // Changes the quality of a share that is going on, without sharing again: the
+    // capture is re-constrained and the SFU and P2P senders get the new limits.
+    public async setScreenQuality(quality: ScreenShareQuality) {
+        const next = normalizeShareQuality(quality);
+        setShareQuality(next);
+
+        const track = this.localScreenTrack;
+        if (!track || track.readyState !== 'live') {
+            return;
+        }
+
+        const prev = this.screenQuality;
+        this.screenQuality = next;
+        applyContentHint(track, next.content);
+
+        const before = this.getScreenCaptureSize();
+        try {
+            await track.applyConstraints(buildLiveConstraints(next));
+        } catch (err) {
+            // Electron's legacy desktop capture tracks may refuse new constraints. The senders
+            // below still get the bitrate, frame rate and degradation preference.
+            logWarn('failed to apply screen constraints', err);
+        }
+        if (this.localScreenTrack !== track) {
+            return;
+        }
+
+        // The capture size follows the constraints a moment later: wait for it (bounded)
+        // so the bitrate matches the real size.
+        if (!prev || prev.resolution !== next.resolution) {
+            await this.waitForCaptureSizeChange(track, before, 1500);
+            if (this.localScreenTrack !== track) {
+                return;
+            }
+        }
+
+        const captured = this.getScreenCaptureSize();
+        if (this.screenOnSFU) {
+            await this.applyScreenSenderParams(track.id);
+        }
+        this.p2p?.setScreenQuality(next, captured);
+        this.emitScreenQuality();
+    }
+
+    private async waitForCaptureSizeChange(track: MediaStreamTrack, before: CaptureSize | null, timeoutMs: number) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const s = track.getSettings?.();
+            if (!before || (s?.width && s?.height && (s.width !== before.width || s.height !== before.height))) {
+                return;
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+    }
+
+    public async shareScreen(sourceID?: string, withAudio?: boolean, quality?: ScreenShareQuality) {
         if (!this.ws || !this.peer) {
             return null;
         }
 
-        const screenStream = await getScreenStream(sourceID, withAudio);
+        const shareQuality = quality ? normalizeShareQuality(quality) : getShareQuality();
+        const screenStream = await getScreenStream(sourceID, withAudio, shareQuality);
         if (screenStream === null) {
             return null;
         }
 
-        await this.setScreenStream(screenStream);
+        await this.setScreenStream(screenStream, shareQuality);
 
         return screenStream;
     }

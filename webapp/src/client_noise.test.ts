@@ -322,6 +322,20 @@ describe('CallsClient noise levels on the voice senders', () => {
         delete (navigator as any).mediaDevices;
     });
 
+    it('media that went peer to peer while the SFU voice sender was being added does not stay on the SFU', async () => {
+        await joinWithMic('enhanced');
+        const processed = mockGraphs[0].track;
+        peer.addTrack = jest.fn(async () => {
+            // signaling takes a moment, the p2p connection comes up meanwhile and suspends the SFU media
+            client.p2pActive = true;
+        });
+
+        await client.attachVoiceToSFU();
+
+        expect(peer.addTrack).toHaveBeenCalledWith(processed, client.stream);
+        expect(peer.replaceTrack).toHaveBeenCalledWith(processed.id, null);
+    });
+
     it('changing the noise level never changes the selected microphone', async () => {
         const stored = JSON.stringify({deviceId: 'dev2', label: 'USB mic'});
         window.localStorage.setItem(STORAGE_CALLS_DEFAULT_AUDIO_INPUT_KEY, stored);

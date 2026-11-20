@@ -336,6 +336,18 @@ export default class CallsClient extends EventEmitter {
             await this.peer.addTrack(track, this.stream);
             this.voiceTrackAdded = true;
             this.voiceSenderTrackID = track.id;
+
+            // The media went peer to peer while the sender was being added (signaling takes a moment): the
+            // suspend that ran meanwhile did not know about this sender, so do it now. The track must not go
+            // out over the SFU as well.
+            if (this.p2pActive) {
+                try {
+                    // @ts-ignore: we actually mean (and need) to pass null here
+                    this.peer.replaceTrack(this.voiceSenderID(), null);
+                } catch (err) {
+                    logWarn('failed to suspend the new voice sender', err);
+                }
+            }
         }
     }
 

@@ -660,7 +660,8 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                 }
             }
 
-            if (isDMChannel(this.props.channel) || isGMChannel(this.props.channel)) {
+            // DM/GM calls start unmuted, except with push-to-talk where the mic only opens while the key is held.
+            if ((isDMChannel(this.props.channel) || isGMChannel(this.props.channel)) && !isPushToTalkActive()) {
                 callsClient?.unmute();
             }
 

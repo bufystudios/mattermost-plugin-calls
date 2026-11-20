@@ -146,8 +146,17 @@ type InitOptions = {
 };
 
 function defaultGetClient(win: Window): ClientLike | undefined {
-    return (win as unknown as {callsClient?: ClientLike}).callsClient ??
-        (win.opener as unknown as {callsClient?: ClientLike} | null)?.callsClient;
+    const own = (win as unknown as {callsClient?: ClientLike}).callsClient;
+    if (own) {
+        return own;
+    }
+
+    try {
+        return (win.opener as unknown as {callsClient?: ClientLike} | null)?.callsClient;
+    } catch {
+        // The opener is on another origin (e.g. MM was opened from a link in another app): not a pop out.
+        return undefined;
+    }
 }
 
 // Installs push-to-talk in a window. Returns a function that removes it.

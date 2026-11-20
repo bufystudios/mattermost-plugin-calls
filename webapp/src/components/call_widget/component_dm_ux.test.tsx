@@ -120,8 +120,10 @@ const renderWidget = (overrides: Partial<Props> = {}) => render(
 
 describe('CallWidget in a DM call', () => {
     let client: {mute: jest.Mock; unmute: jest.Mock};
+    let handlers: {[event: string]: () => void};
 
     beforeEach(() => {
+        handlers = {};
         client = {mute: jest.fn(), unmute: jest.fn()};
         window.callsClient = {
             ...client,
@@ -133,7 +135,9 @@ describe('CallWidget in a DM call', () => {
             getSpeakingSessions: () => [],
             getRemoteScreenStream: () => null,
             getLocalScreenStream: () => null,
-            on: jest.fn(),
+            on: jest.fn((event: string, cb: () => void) => {
+                handlers[event] = cb;
+            }),
             off: jest.fn(),
         } as unknown as CallsClient;
     });
@@ -231,6 +235,23 @@ describe('CallWidget in a DM call', () => {
     });
 
     describe('push to talk', () => {
+        test('a DM call starts unmuted when push-to-talk is off', () => {
+            renderWidget();
+
+            handlers.connect();
+
+            expect((window.callsClient as unknown as typeof client).unmute).toHaveBeenCalledTimes(1);
+        });
+
+        test('with push-to-talk on the call starts muted (the mic only opens while the key is held)', () => {
+            setPushToTalkConfig({enabled: true, code: 'KeyV'});
+            renderWidget();
+
+            handlers.connect();
+
+            expect((window.callsClient as unknown as typeof client).unmute).not.toHaveBeenCalled();
+        });
+
         test('the mute button still toggles the mic when push-to-talk is off', () => {
             renderWidget();
 

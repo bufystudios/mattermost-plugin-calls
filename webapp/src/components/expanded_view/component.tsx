@@ -1130,7 +1130,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                     isSpeaking={isSessionSpeaking(session, this.props.localSpeaking)}
                     isLive={this.props.screenSharingSession?.session_id === session.session_id}
                     volumeUserID={session === otherSession ? profile.id : undefined}
-                    onClick={this.isShowingScreenPlayer() || !this.props.otherSessions.length ? undefined : () => this.onFocusSession(session.session_id)}
+                    onClick={this.isSelfFocused() && !this.isShowingScreenPlayer() ? () => this.onFocusSession(session.session_id) : undefined}
                     mirrorVideo={session === selfSession && mirrorSelfVideo}
                     aspectRatio={session === otherSession && !session.video ? '16/9' : ''}
                 />

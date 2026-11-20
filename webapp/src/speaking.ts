@@ -209,7 +209,11 @@ export class SpeakingMonitor {
             if (this.opts.attachSink) {
                 sink = new Audio();
                 sink.muted = true;
+                sink.autoplay = true;
                 sink.srcObject = stream;
+
+                // Muted playback is always allowed by autoplay policies.
+                sink.play?.()?.catch?.(ignore);
             }
 
             const analyser = ctx.createAnalyser();

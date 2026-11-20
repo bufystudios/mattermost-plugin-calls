@@ -219,6 +219,22 @@ describe('initPushToTalk', () => {
         dispose();
     });
 
+    it('does not break when the opener is on another origin', () => {
+        setPushToTalkConfig({enabled: true, code: 'KeyV'});
+        const fakeWin = {
+            document,
+            addEventListener: jest.fn(),
+            removeEventListener: jest.fn(),
+            get opener() {
+                throw new DOMException('Blocked a frame with origin', 'SecurityError');
+            },
+        } as unknown as Window;
+        const dispose = initPushToTalk(fakeWin);
+
+        expect(() => document.dispatchEvent(keyEvent('keydown', 'KeyV'))).not.toThrow();
+        dispose();
+    });
+
     it('stops listening once disposed', () => {
         setPushToTalkConfig({enabled: true, code: 'KeyV'});
         const client = {mute: jest.fn(), unmute: jest.fn()};

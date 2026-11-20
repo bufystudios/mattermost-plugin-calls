@@ -49,6 +49,11 @@ export const DefaultVideoTrackOptions: MediaTrackConstraints = {
 
 const rtcMonitorInterval = 10000;
 
+// Screen sharing encodings (high quality). VP8 is the fallback track and is
+// sent alongside AV1, so AV1 gets a lower cap (it is more efficient).
+const screenEncodingsVP8 = {maxBitrate: 8_000_000, maxFramerate: 60, scaleResolutionDownBy: 1.0};
+const screenEncodingsAV1 = {maxBitrate: 6_000_000, maxFramerate: 60, scaleResolutionDownBy: 1.0};
+
 export default class CallsClient extends EventEmitter {
     public channelID: string;
     private readonly config: CallsClientConfig;
@@ -1028,15 +1033,40 @@ export default class CallsClient extends EventEmitter {
             }),
         });
 
+        // Smoothness over text sharpness: we mostly share game footage.
+        screenTrack.contentHint = 'motion';
+
         // Always send a fallback track (VP8 encoded) for receivers that don't yet support AV1.
-        await this.peer.addStream(screenStream);
+        // Index 0 of the opts array maps to the video track (audio ignores encodings).
+        // Without explicit encodings calls-common caps screen tracks at 1Mbps/10fps.
+        await this.peer.addStream(screenStream, [{encodings: [{...screenEncodingsVP8}]}]);
 
         if (this.config.enableAV1 && this.av1Codec) {
             logDebug(`AV1 supported, sending track: ${this.av1Codec}`);
 
             await this.peer.addTrack(screenTrack, screenStream, {
                 codec: this.av1Codec,
+                encodings: [{...screenEncodingsAV1}],
             });
+        }
+
+        await this.applyScreenSenderParams(screenTrack.id);
+    }
+
+    // sendEncodings cannot carry degradationPreference, so it is set on the
+    // senders after they are created. RTCPeer keeps its senders in a private
+    // map keyed by track id, hence the cast.
+    private async applyScreenSenderParams(trackID: string) {
+        const senders = (this.peer as unknown as {senders?: Record<string, RTCRtpSender[]>} | null)?.senders?.[trackID] ?? [];
+        for (const sender of senders) {
+            try {
+                const params = sender.getParameters();
+                params.degradationPreference = 'maintain-framerate';
+                // eslint-disable-next-line no-await-in-loop
+                await sender.setParameters(params);
+            } catch (err) {
+                logWarn('failed to set screen sender parameters', err);
+            }
         }
     }
 

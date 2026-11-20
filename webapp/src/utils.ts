@@ -285,7 +285,15 @@ export async function getScreenStream(sourceID?: string, withAudio?: boolean): P
             }
             screenStream = await navigator.mediaDevices.getUserMedia({
                 video: {
-                    mandatory: options,
+                    mandatory: {
+                        ...options,
+
+                        // Legacy Chromium keys: request up to 60fps / 1440p.
+                        minFrameRate: 30,
+                        maxFrameRate: 60,
+                        maxWidth: 2560,
+                        maxHeight: 1440,
+                    },
                 } as Record<string, unknown>,
                 audio: withAudio ? {mandatory: options} as Record<string, unknown> : false,
             });
@@ -298,7 +306,13 @@ export async function getScreenStream(sourceID?: string, withAudio?: boolean): P
         logDebug(`getScreenStream: using browser getDisplayMedia with audio: ${Boolean(withAudio)}`);
         try {
             screenStream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
+
+                // Ask for 60fps and up to 1440p; the browser picks what the source supports.
+                video: {
+                    frameRate: {ideal: 60, max: 60},
+                    width: {ideal: 2560},
+                    height: {ideal: 1440},
+                },
                 audio: Boolean(withAudio),
             });
             logDebug(`getScreenStream: received stream with ${screenStream?.getVideoTracks().length} video tracks and ${screenStream?.getAudioTracks().length} audio tracks`);

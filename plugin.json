@@ -1,7 +1,7 @@
 {
   "id": "com.mattermost.calls",
   "name": "Calls",
-  "description": "Integrates real-time voice communication in Mattermost",
+  "description": "Integrates real-time voice communication in Mattermost. Bufy build: P2P 1:1 calls, 4K60 screen share, noise suppression. Enhanced by Ümit Altıntaş.",
   "homepage_url": "https://github.com/mattermost/mattermost-plugin-calls/",
   "support_url": "https://github.com/mattermost/mattermost-plugin-calls/issues",
   "icon_path": "assets/plugin_icon.svg",

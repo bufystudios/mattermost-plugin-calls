@@ -134,6 +134,9 @@ type ClientConfig struct {
 	HostControlsAllowed bool
 	// When set to true it enables using the AV1 codec to encode screen sharing tracks.
 	EnableAV1 *bool
+	// When set to true, 1:1 calls in DM channels send media directly between the two
+	// participants (peer-to-peer) instead of through the RTC server.
+	EnableP2PDirectCalls *bool
 	// Let the server determine whether or not group calls are allowed (through license checks or otherwise)
 	GroupCallsAllowed bool
 	// When set to true it enables experimental support for using the data channel for signaling.
@@ -268,6 +271,9 @@ func (c *configuration) SetDefaults() {
 	}
 	if c.EnableVideo == nil {
 		c.EnableVideo = model.NewPointer(false)
+	}
+	if c.EnableP2PDirectCalls == nil {
+		c.EnableP2PDirectCalls = model.NewPointer(true)
 	}
 }
 
@@ -465,6 +471,10 @@ func (c *configuration) Clone() *configuration {
 		cfg.EnableVideo = model.NewPointer(*c.EnableVideo)
 	}
 
+	if c.EnableP2PDirectCalls != nil {
+		cfg.EnableP2PDirectCalls = model.NewPointer(*c.EnableP2PDirectCalls)
+	}
+
 	return &cfg
 }
 
@@ -536,6 +546,7 @@ func (p *Plugin) getClientConfig(c *configuration) ClientConfig {
 		GroupCallsAllowed:    p.licenseChecker.GroupCallsAllowed(),
 		EnableDCSignaling:    c.EnableDCSignaling,
 		EnableVideo:          c.EnableVideo,
+		EnableP2PDirectCalls: c.EnableP2PDirectCalls,
 	}
 }
 

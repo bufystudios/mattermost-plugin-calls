@@ -84,6 +84,13 @@
             "type": "bool",
             "default": false,
             "help_text": "When set to true, video calls are enabled in direct message channels."
+          },
+          {
+            "key": "EnableP2PDirectCalls",
+            "display_name": "Enable direct peer-to-peer media in 1:1 calls",
+            "type": "bool",
+            "default": true,
+            "help_text": "When set to true, calls between two people in a direct message channel send audio, video and screen sharing directly between the two participants instead of through the server, falling back to the server automatically if a direct connection cannot be established. Calls with more than two participants, recordings, transcriptions and live captions always use the server. Note: with a direct connection the two participants can see each other's IP address."
           }
         ]
       },

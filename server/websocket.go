@@ -529,6 +529,16 @@ func (p *Plugin) handleClientMsg(us *session, msg clientMessage, handlerID strin
 			ChannelID: us.channelID,
 			UserIDs:   getUserIDsFromSessions(sessions),
 		})
+	case clientMessageTypeP2PSignal:
+		if err := p.handleP2PSignal(us, msg); err != nil {
+			// A refused relay is expected whenever the call stops being eligible
+			// (e.g. a third participant joins), clients fall back to the SFU.
+			if errors.Is(err, errP2PNotAllowed) {
+				p.LogDebug("p2p signal refused", "err", err.Error(), "connID", us.connID)
+				return nil
+			}
+			return err
+		}
 	default:
 		return fmt.Errorf("invalid client message type %q", msg.Type)
 	}
@@ -1346,7 +1356,7 @@ func (p *Plugin) WebSocketMessageHasBeenPosted(connID, userID string, req *model
 			p.LogError("handleCallStateRequest failed", "err", err.Error(), "userID", userID, "connID", connID)
 		}
 		return
-	case clientMessageTypeSDP:
+	case clientMessageTypeSDP, clientMessageTypeP2PSignal:
 		msgData, ok := req.Data["data"].([]byte)
 		if !ok {
 			p.LogError("invalid or missing sdp data")

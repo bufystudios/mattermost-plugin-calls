@@ -124,6 +124,10 @@ export default class CallsClient extends EventEmitter {
     private noise: NoiseController | null = null;
     private noiseOutput: MediaStreamTrack | null = null;
 
+    // The browser noise suppression value the microphone was last reopened for (see setBrowserNoise), so a device
+    // that ignores the constraint is reopened once, not in a loop. A device chosen by the user clears it.
+    private noiseReopenedFor: boolean | null = null;
+
     // Bumped by every mute and unmute so an unmute that was waiting (for the noise filter) can tell it was overtaken
     // (a quick push-to-talk press and release) and leaves the mic closed.
     private micIntent = 0;
@@ -282,9 +286,12 @@ export default class CallsClient extends EventEmitter {
             logWarn('failed to apply noise suppression on the live track', err);
         }
 
+        // One reopen per wanted value: a device that ignores the constraint (and keeps ignoring it after the reopen)
+        // must not be reopened over and over, every new microphone track runs the controller again.
         const actual = track.getSettings?.().noiseSuppression;
-        if (actual !== undefined && actual !== enabled && this.currentAudioInputDevice && this.peer) {
+        if (actual !== undefined && actual !== enabled && this.peer && this.noiseReopenedFor !== enabled) {
             logDebug('microphone ignored the noise suppression constraint, reopening it');
+            this.noiseReopenedFor = enabled;
             try {
                 await this.reopenAudioInput(enabled);
             } catch (err) {
@@ -1149,6 +1156,7 @@ export default class CallsClient extends EventEmitter {
             return;
         }
 
+        this.noiseReopenedFor = null;
         try {
             await this.swapMicrophone(device.deviceId, this.defaultAudioTrackOptions);
         } catch (err) {
@@ -1160,7 +1168,8 @@ export default class CallsClient extends EventEmitter {
     // Opens the current microphone again with the browser's noise suppression set to `enabled` (the fallback of
     // setBrowserNoise for capture devices that ignore applyConstraints).
     private async reopenAudioInput(enabled: boolean) {
-        const deviceId = this.currentAudioInputDevice?.deviceId;
+        // No device was ever chosen (the system default is in use): reopen the one the track came from.
+        const deviceId = this.currentAudioInputDevice?.deviceId ?? this.audioTrack?.getSettings?.().deviceId;
         if (!deviceId) {
             return;
         }

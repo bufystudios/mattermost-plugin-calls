@@ -138,6 +138,7 @@ import SwitchCallModal from './components/switch_call_modal';
 import {
     handleDesktopJoinedCall,
 } from './desktop';
+import {attachDesktopIntegration, desktopIntegrationOptions} from './desktop_bufy';
 import {flushLogsToAccumulated, logDebug, logErr, logInfo} from './log';
 import {pluginId} from './manifest';
 import {syncP2PContext} from './p2p_sync';
@@ -733,6 +734,10 @@ export default class Plugin {
                 });
                 window.currentCallData = {...CurrentCallDataDefault};
                 const unsubscribeP2PSync = syncP2PContext(store, window.callsClient);
+
+                // Bufy desktop app: only reached when this window owns the client (the stock desktop app and
+                // the Bufy one use the call widget window, see standalone/src/init.ts). No-op without the API.
+                attachDesktopIntegration(window.callsClient, desktopIntegrationOptions(() => channel?.display_name || title || 'Call', () => getCurrentUserLocale(store.getState())));
 
                 const locale = getCurrentUserLocale(state) || 'en';
 

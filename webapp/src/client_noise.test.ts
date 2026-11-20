@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 
 import CallsClient from './client';
-import {STORAGE_CALLS_NOISE_SUPPRESSION_KEY} from './constants';
+import {STORAGE_CALLS_DEFAULT_AUDIO_INPUT_KEY, STORAGE_CALLS_NOISE_SUPPRESSION_KEY} from './constants';
 import {getNoiseStatus} from './noise/status';
 
 jest.mock('./log');
@@ -292,6 +292,86 @@ describe('CallsClient noise levels on the voice senders', () => {
 
         expect(peer.replaceTrack).toHaveBeenCalledWith(raw.id, newRaw);
         expect(host.open).not.toHaveBeenCalled();
+
+        delete (navigator as any).mediaDevices;
+    });
+
+    it('reopens the microphone when it ignores the noise suppression constraint (the browser filter must go off)', async () => {
+        raw.getSettings = jest.fn(() => ({noiseSuppression: true, deviceId: 'dev1'}));
+        const newRaw = track('raw2');
+        newRaw.getSettings = jest.fn(() => ({noiseSuppression: false, deviceId: 'dev1'}));
+        const getUserMedia = jest.fn(async () => new FakeMediaStream([newRaw]));
+        (navigator as any).mediaDevices = {getUserMedia, addEventListener: jest.fn(), removeEventListener: jest.fn(), enumerateDevices: jest.fn(async () => [])};
+
+        await joinWithMic('enhanced');
+
+        // Enhanced switches the browser filter off; the first track still reported it on, so it was reopened.
+        expect(raw.applyConstraints).toHaveBeenCalledWith({noiseSuppression: false});
+        expect(getUserMedia).toHaveBeenCalledWith({video: false, audio: expect.objectContaining({noiseSuppression: false, deviceId: {exact: 'dev1'}})});
+        expect(client.audioTrack).toBe(newRaw);
+        expect(host.open).toHaveBeenCalledWith('enhanced', newRaw);
+        expect(host.open).toHaveBeenCalledTimes(1);
+
+        // The new track still reports the old value (a device that ignores the constraint): no reopen loop.
+        newRaw.getSettings = jest.fn(() => ({noiseSuppression: true, deviceId: 'dev1'}));
+        await client.applyNoiseSuppression();
+        await client.noise.sourceChanged();
+        await client.noise.settled(500);
+        expect(getUserMedia).toHaveBeenCalledTimes(1);
+
+        delete (navigator as any).mediaDevices;
+    });
+
+    it('changing the noise level never changes the selected microphone', async () => {
+        const stored = JSON.stringify({deviceId: 'dev2', label: 'USB mic'});
+        window.localStorage.setItem(STORAGE_CALLS_DEFAULT_AUDIO_INPUT_KEY, stored);
+        const device = {deviceId: 'dev2', label: 'USB mic'} as MediaDeviceInfo;
+        client.currentAudioInputDevice = device;
+
+        // A device that ignores the constraint: every wanted value reopens the microphone once, on the same device.
+        const opened: any[] = [];
+        const getUserMedia = jest.fn(async (constraints: any) => {
+            const t = track(`raw-${opened.length + 2}`);
+            t.getSettings = jest.fn(() => ({noiseSuppression: !constraints.audio.noiseSuppression, deviceId: 'dev2'}));
+            opened.push(t);
+            return new FakeMediaStream([t]);
+        });
+        (navigator as any).mediaDevices = {getUserMedia, addEventListener: jest.fn(), removeEventListener: jest.fn(), enumerateDevices: jest.fn(async () => [])};
+        raw.getSettings = jest.fn(() => ({noiseSuppression: true, deviceId: 'dev2'}));
+        await joinWithMic('standard');
+        await client.unmute();
+
+        for (const level of ['enhanced', 'maximum', 'off', 'standard', 'enhanced']) {
+            // eslint-disable-next-line no-await-in-loop
+            await setLevel(level);
+            // eslint-disable-next-line no-await-in-loop
+            await client.noise.settled(1000);
+        }
+
+        // Live constraint changes never carry a device, and every reopen asks for exactly the selected one.
+        const live = [raw, ...opened].flatMap((t) => t.applyConstraints.mock.calls.map((c: any[]) => c[0]));
+        expect(live.length).toBeGreaterThan(0);
+        live.forEach((c) => expect(c).not.toHaveProperty('deviceId'));
+        expect(getUserMedia).toHaveBeenCalled();
+        getUserMedia.mock.calls.forEach(([c]: any[]) => expect(c.audio.deviceId).toEqual({exact: 'dev2'}));
+        expect(client.currentAudioInputDevice).toBe(device);
+        expect(window.localStorage.getItem(STORAGE_CALLS_DEFAULT_AUDIO_INPUT_KEY)).toBe(stored);
+
+        delete (navigator as any).mediaDevices;
+    });
+
+    it('with no chosen device the reopen keeps the device the track came from', async () => {
+        raw.getSettings = jest.fn(() => ({noiseSuppression: true, deviceId: 'sys-default'}));
+        const newRaw = track('raw2');
+        newRaw.getSettings = jest.fn(() => ({noiseSuppression: false, deviceId: 'sys-default'}));
+        const getUserMedia = jest.fn(async () => new FakeMediaStream([newRaw]));
+        (navigator as any).mediaDevices = {getUserMedia, addEventListener: jest.fn(), removeEventListener: jest.fn(), enumerateDevices: jest.fn(async () => [])};
+        expect(client.currentAudioInputDevice).toBeNull();
+
+        await joinWithMic('enhanced');
+
+        expect(getUserMedia).toHaveBeenCalledWith({video: false, audio: expect.objectContaining({deviceId: {exact: 'sys-default'}})});
+        expect(client.currentAudioInputDevice).toBeNull();
 
         delete (navigator as any).mediaDevices;
     });

@@ -44,6 +44,7 @@ import AllowScreenSharing from 'src/components/admin_console_settings/allow_scre
 import EnableAV1 from 'src/components/admin_console_settings/enable_av1';
 import EnableDCSignaling from 'src/components/admin_console_settings/enable_dc_signaling';
 import EnableIPv6 from 'src/components/admin_console_settings/enable_ipv6';
+import EnableP2PDirectCalls from 'src/components/admin_console_settings/enable_p2p_direct_calls';
 import EnableRinging from 'src/components/admin_console_settings/enable_ringing';
 import EnableSimulcast from 'src/components/admin_console_settings/enable_simulcast';
 import EnableVideo from 'src/components/admin_console_settings/enable_video';
@@ -135,6 +136,7 @@ import {
 } from './desktop';
 import {flushLogsToAccumulated, logDebug, logErr, logInfo} from './log';
 import {pluginId} from './manifest';
+import {syncP2PContext} from './p2p_sync';
 import reducer from './reducers';
 import {
     callsConfig,
@@ -151,6 +153,7 @@ import {
     isCloudStarter,
     isLimitRestricted,
     needsTURNCredentials,
+    p2pDirectCallsEnabled,
     ringingEnabled,
     sessionsInCurrentCall,
 } from './selectors';
@@ -524,6 +527,7 @@ export default class Plugin {
         registry.registerAdminConsoleCustomSetting('EnableRinging', EnableRinging);
         registry.registerAdminConsoleCustomSetting('EnableDCSignaling', EnableDCSignaling);
         registry.registerAdminConsoleCustomSetting('EnableVideo', EnableVideo);
+        registry.registerAdminConsoleCustomSetting('EnableP2PDirectCalls', EnableP2PDirectCalls);
 
         // RTCD Service
         if (registry.registerAdminConsoleCustomSection) {
@@ -712,8 +716,10 @@ export default class Plugin {
                     dcSignaling: callsConfig(state).EnableDCSignaling,
                     dcLocking: hasDCSignalingLockSupport(callsVersionInfo(state)),
                     enableVideo: callsConfig(state).EnableVideo && isDMChannel(channel),
+                    p2pEnabled: p2pDirectCallsEnabled(state) && isDMChannel(channel),
                 });
                 window.currentCallData = {...CurrentCallDataDefault};
+                const unsubscribeP2PSync = syncP2PContext(store, window.callsClient);
 
                 const locale = getCurrentUserLocale(state) || 'en';
 
@@ -755,6 +761,7 @@ export default class Plugin {
 
                 window.callsClient.on('close', (err?: Error) => {
                     store.dispatch(setClientConnecting(false));
+                    unsubscribeP2PSync();
 
                     unmountCallWidget();
                     if (window.desktop) {

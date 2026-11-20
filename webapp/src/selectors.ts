@@ -517,6 +517,10 @@ export const didNotifyForCall = (state: GlobalState, callID: string): boolean =>
 export const callsConfig = (state: GlobalState): CallsConfig =>
     pluginState(state).callsConfig;
 
+// EnableP2PDirectCalls is not part of the published calls-common config type yet.
+export const p2pDirectCallsEnabled = (state: GlobalState): boolean =>
+    Boolean((callsConfig(state) as CallsConfig & {EnableP2PDirectCalls?: boolean}).EnableP2PDirectCalls);
+
 export const iceServers = (state: GlobalState): RTCIceServer[] =>
     callsConfig(state).ICEServersConfigs || [];
 

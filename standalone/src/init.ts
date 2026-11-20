@@ -49,9 +49,10 @@ import {
     logErr,
 } from 'plugin/log';
 import {pluginId} from 'plugin/manifest';
+import {syncP2PContext} from 'plugin/p2p_sync';
 import reducer from 'plugin/reducers';
 import RestClient from 'plugin/rest_client';
-import {callsConfig, callsVersionInfo, iceServers, needsTURNCredentials} from 'plugin/selectors';
+import {callsConfig, callsVersionInfo, iceServers, needsTURNCredentials, p2pDirectCallsEnabled} from 'plugin/selectors';
 import {DesktopNotificationArgs, Store, WebAppUtils} from 'plugin/types/mattermost-webapp';
 import {
     getPluginPath,
@@ -119,11 +120,13 @@ function connectCall(
 
         window.callsClient = new CallsClient(clientConfig);
         window.currentCallData = {...CurrentCallDataDefault};
+        const unsubscribeP2PSync = syncP2PContext(store, window.callsClient);
 
         window.callsClient.on('connect', () => store.dispatch(setClientConnecting(false)));
 
         window.callsClient.on('close', (err?: Error) => {
             store.dispatch(setClientConnecting(false));
+            unsubscribeP2PSync();
             if (window.callsClient) {
                 store.dispatch(localSessionClose(window.callsClient.channelID));
             }
@@ -245,6 +248,7 @@ export default async function init(cfg: InitConfig) {
         dcSignaling: callsConfig(store.getState()).EnableDCSignaling,
         dcLocking: hasDCSignalingLockSupport(callsVersionInfo(store.getState())),
         enableVideo: callsConfig(store.getState()).EnableVideo && isDMChannel(channel),
+        p2pEnabled: p2pDirectCallsEnabled(store.getState()) && isDMChannel(channel),
     };
 
     connectCall(joinData, clientConfig, (ev) => {

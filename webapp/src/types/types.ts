@@ -40,6 +40,9 @@ export type CallsClientConfig = {
     dcSignaling: boolean;
     dcLocking: boolean;
     enableVideo: boolean;
+
+    // Whether peer-to-peer media may be used in this call (EnableP2PDirectCalls and DM channel).
+    p2pEnabled?: boolean;
 }
 
 export type MediaDevices = {

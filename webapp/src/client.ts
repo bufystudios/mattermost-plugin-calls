@@ -12,6 +12,7 @@ import {zlibSync, strToU8} from 'fflate';
 import {MediaDevices, CallsClientConfig, CallsClientStats, TrackMetadata} from 'src/types/types';
 
 import {logDebug, logErr, logInfo, logWarn, persistClientLogs, flushLogsToAccumulated} from './log';
+import {P2PController, type P2PContext, type P2PState, type P2PTrackType} from './p2p';
 import {getScreenStream, getPersistentStorage} from './utils';
 import {WebSocketClient, WebSocketError, WebSocketErrorType} from './websocket';
 import {
@@ -91,6 +92,26 @@ export default class CallsClient extends EventEmitter {
     private defaultVideoTrackOptions: MediaTrackConstraints;
     private defaultVideoTrackEncodings: RTPEncodingParameters[];
     private segmenter: Segmenter | null = null;
+
+    // P2P media path for 1:1 DM calls (see p2p.ts and docs/bufy-p2p.md).
+    private p2p: P2PController | null = null;
+    private pendingP2PContext: P2PContext | null = null;
+
+    // True while the P2P connection carries the media. The SFU peer then sends
+    // nothing (its senders are kept, holding null tracks) and the media is
+    // sent again over the SFU if P2P is abandoned.
+    private p2pActive = false;
+    private localScreenStream: MediaStream | null = null;
+    private localScreenAudioTrack: MediaStreamTrack | null = null;
+
+    // Whether the screen senders exist on the SFU peer.
+    private screenOnSFU = false;
+
+    // Last screen track received from the SFU, to switch back to it if P2P goes away.
+    private sfuRemoteScreenTrack: MediaStreamTrack | null = null;
+
+    // Remote tracks received through the P2P connection.
+    private p2pRemoteTracks = new Set<MediaStreamTrack>();
 
     constructor(config: CallsClientConfig) {
         logDebug('creating new calls client', JSON.stringify(config));
@@ -588,49 +609,7 @@ export default class CallsClient extends EventEmitter {
             });
 
             peer.on('stream', (remoteStream: MediaStream, trackInfo: TrackInfo) => {
-                logDebug('new remote stream received', remoteStream.id, 'trackInfo:', trackInfo);
-                for (const track of remoteStream.getTracks()) {
-                    logDebug('remote track', track.kind, track.id, 'label:', track.label);
-                }
-
-                this.streams.push(remoteStream);
-
-                const audioTracks = remoteStream.getAudioTracks();
-                const videoTracks = remoteStream.getVideoTracks();
-
-                logDebug('stream has', audioTracks.length, 'audio tracks and', videoTracks.length, 'video tracks');
-
-                // Handle audio tracks based on type
-                if (audioTracks.length > 0) {
-                    if (trackInfo?.type === 'screen-audio') {
-                        // Screen share audio - emit as voice stream so it gets played
-                        logDebug('received screen-audio track, emitting as remoteVoiceStream');
-                        this.emit('remoteVoiceStream', new MediaStream(audioTracks));
-                        this.remoteVoiceTracks.push(...audioTracks);
-                    } else if (trackInfo?.type === 'voice' || !trackInfo?.type) {
-                        // Regular voice audio
-                        logDebug('received voice track, emitting as remoteVoiceStream');
-                        this.emit('remoteVoiceStream', remoteStream);
-                        this.remoteVoiceTracks.push(...audioTracks);
-                    } else {
-                        logDebug('unexpected audio track type:', trackInfo?.type);
-                    }
-                }
-
-                // Handle video tracks based on type
-                if (videoTracks.length > 0) {
-                    if (trackInfo?.type === 'video') {
-                        logDebug('received video track, emitting as remoteVideoStream');
-                        this.emit('remoteVideoStream', remoteStream);
-                        this.remoteVideoTracks.push(videoTracks[0]);
-                    } else if (trackInfo?.type === 'screen') {
-                        logDebug('received screen track, emitting as remoteScreenStream');
-                        this.emit('remoteScreenStream', remoteStream);
-                        this.remoteScreenTrack = videoTracks[0];
-                    } else {
-                        logDebug('unexpected video track type:', trackInfo?.type);
-                    }
-                }
+                this.onRemoteStream(remoteStream, trackInfo, 'sfu');
             });
 
             peer.on('connect', () => {
@@ -648,6 +627,8 @@ export default class CallsClient extends EventEmitter {
                     this.disconnect(rtcPeerCloseErr);
                 }
             });
+
+            this.initP2P(ws);
         });
 
         ws.on('message', async ({data}) => {
@@ -660,11 +641,239 @@ export default class CallsClient extends EventEmitter {
                     if (this.peer) {
                         await this.peer.signal(data);
                     }
+                } else if (msg.type === 'p2p_signal') {
+                    this.p2p?.handleSignal({from: msg.from, kind: msg.kind, data: msg.data});
                 }
             } catch (err) {
                 logErr('ws.on(message): failed to handle message', err, 'data:', data);
             }
         });
+    }
+
+    private initP2P(ws: WebSocketClient) {
+        if (!this.config.p2pEnabled || this.p2p) {
+            return;
+        }
+
+        const p2p = new P2PController(ws.getOriginalConnID(), {
+            iceServers: this.config.iceServers || [],
+            enableAV1: this.config.enableAV1,
+            encodings: {
+                video: this.defaultVideoTrackEncodings[0],
+                screenVP8: screenEncodingsVP8,
+                screenAV1: screenEncodingsAV1,
+            },
+            sendSignal: (to, kind, data) => {
+                // Compressed like SDP data since the offer can be large.
+                ws.send('p2p_signal', {
+                    data: zlibSync(strToU8(JSON.stringify({to, kind, data}))),
+                }, true);
+            },
+        });
+        this.p2p = p2p;
+
+        p2p.on('statechange', (state: P2PState, prev: P2PState) => this.onP2PStateChange(state, prev));
+        p2p.on('remotetrack', ({type, track}: {type: P2PTrackType; track: MediaStreamTrack}) => {
+            this.onRemoteStream(new MediaStream([track]), {type}, 'p2p');
+        });
+
+        this.syncP2PMedia();
+        if (this.pendingP2PContext) {
+            p2p.setContext(this.pendingP2PContext);
+        }
+    }
+
+    // Tells the client whether P2P media can be used. Called whenever the call
+    // state (sessions, recording, ...) changes.
+    public setP2PContext(ctx: P2PContext) {
+        this.pendingP2PContext = ctx;
+        this.p2p?.setContext(ctx);
+    }
+
+    public getP2PState(): P2PState | null {
+        return this.p2p?.getState() ?? null;
+    }
+
+    // The local tracks that should be sent, regardless of the path (SFU or P2P).
+    private syncP2PMedia() {
+        if (!this.p2p) {
+            return;
+        }
+
+        const videoTrack = this.localVideoStream?.getVideoTracks()[0];
+        this.p2p.setLocalMedia({
+            voice: this.audioTrack?.enabled ? this.audioTrack : null,
+            video: videoTrack && videoTrack.enabled && videoTrack.readyState === 'live' ? videoTrack : null,
+            screen: this.localScreenTrack,
+            screenAudio: this.localScreenAudioTrack,
+        });
+    }
+
+    private onP2PStateChange(state: P2PState, prev: P2PState) {
+        if (state === 'p2p' && prev !== 'p2p') {
+            this.p2pActive = true;
+            this.suspendSFUMedia();
+        } else if (state !== 'p2p' && prev === 'p2p') {
+            this.p2pActive = false;
+            this.restoreRemoteTracksFromSFU();
+            this.resumeSFUMedia().catch((err) => logErr('failed to resume sending media over the SFU', err));
+        }
+    }
+
+    // Stops sending media over the SFU. Senders are kept (with null tracks)
+    // so that sending can be resumed without renegotiating.
+    private suspendSFUMedia() {
+        if (!this.peer) {
+            return;
+        }
+
+        logDebug('p2p active, suspending media over the SFU');
+
+        const replaceWithNull = (trackID: string) => {
+            try {
+                // @ts-ignore: we actually mean (and need) to pass null here
+                this.peer?.replaceTrack(trackID, null);
+            } catch (err) {
+                logWarn('failed to suspend sfu sender', trackID, err);
+            }
+        };
+
+        if (this.audioTrack && this.voiceTrackAdded) {
+            replaceWithNull(this.audioTrack.id);
+        }
+        if (this.videoTrackAdded) {
+            replaceWithNull(this.videoSenderTrackID);
+        }
+        if (this.screenOnSFU && this.localScreenTrack) {
+            replaceWithNull(this.localScreenTrack.id);
+            if (this.localScreenAudioTrack) {
+                replaceWithNull(this.localScreenAudioTrack.id);
+            }
+        }
+    }
+
+    // Sends over the SFU whatever is currently enabled locally.
+    private async resumeSFUMedia() {
+        if (!this.peer || this.p2pActive) {
+            return;
+        }
+
+        logDebug('p2p not active anymore, resuming media over the SFU');
+
+        try {
+            if (this.audioTrack?.enabled && this.stream) {
+                if (this.voiceTrackAdded) {
+                    this.peer.replaceTrack(this.audioTrack.id, this.audioTrack);
+                } else {
+                    await this.peer.addTrack(this.audioTrack, this.stream);
+                    this.voiceTrackAdded = true;
+                }
+            }
+        } catch (err) {
+            logErr('failed to resume voice over the SFU', err);
+        }
+
+        try {
+            const videoTrack = this.localVideoStream?.getVideoTracks()[0];
+            if (videoTrack?.enabled && videoTrack.readyState === 'live') {
+                await this.sendVideoOverSFU(videoTrack);
+            }
+        } catch (err) {
+            logErr('failed to resume video over the SFU', err);
+        }
+
+        try {
+            if (this.localScreenTrack && this.localScreenStream) {
+                if (this.screenOnSFU) {
+                    this.peer.replaceTrack(this.localScreenTrack.id, this.localScreenTrack);
+                    if (this.localScreenAudioTrack) {
+                        this.peer.replaceTrack(this.localScreenAudioTrack.id, this.localScreenAudioTrack);
+                    }
+                } else {
+                    await this.sendScreenOverSFU(this.localScreenStream, this.localScreenTrack);
+                }
+            }
+        } catch (err) {
+            logErr('failed to resume screen over the SFU', err);
+        }
+    }
+
+    // The remote P2P tracks are gone (their connection was closed) so we point the
+    // UI back to the tracks received from the SFU, which resume as soon as
+    // the other side sends over the SFU again.
+    private restoreRemoteTracksFromSFU() {
+        const isSFUTrack = (track: MediaStreamTrack) => !this.p2pRemoteTracks.has(track) && track.readyState === 'live';
+
+        this.remoteVoiceTracks = this.remoteVoiceTracks.filter(isSFUTrack);
+
+        this.remoteVideoTracks = this.remoteVideoTracks.filter(isSFUTrack);
+        const videoTrack = this.remoteVideoTracks[this.remoteVideoTracks.length - 1];
+        if (videoTrack) {
+            this.emit('remoteVideoStream', new MediaStream([videoTrack]));
+        }
+
+        if (this.remoteScreenTrack && this.p2pRemoteTracks.has(this.remoteScreenTrack)) {
+            this.remoteScreenTrack = null;
+            if (this.sfuRemoteScreenTrack && isSFUTrack(this.sfuRemoteScreenTrack)) {
+                this.remoteScreenTrack = this.sfuRemoteScreenTrack;
+                this.emit('remoteScreenStream', new MediaStream([this.sfuRemoteScreenTrack]));
+            }
+        }
+
+        this.p2pRemoteTracks.clear();
+    }
+
+    // Handles a remote track coming from either the SFU or the P2P connection.
+    private onRemoteStream(remoteStream: MediaStream, trackInfo: {type?: P2PTrackType | string} | undefined, origin: 'sfu' | 'p2p') {
+        logDebug('new remote stream received', origin, remoteStream.id, 'trackInfo:', trackInfo);
+        for (const track of remoteStream.getTracks()) {
+            logDebug('remote track', track.kind, track.id, 'label:', track.label);
+        }
+
+        this.streams.push(remoteStream);
+        if (origin === 'p2p') {
+            remoteStream.getTracks().forEach((track) => this.p2pRemoteTracks.add(track));
+        }
+
+        const audioTracks = remoteStream.getAudioTracks();
+        const videoTracks = remoteStream.getVideoTracks();
+
+        logDebug('stream has', audioTracks.length, 'audio tracks and', videoTracks.length, 'video tracks');
+
+        // Handle audio tracks based on type
+        if (audioTracks.length > 0) {
+            if (trackInfo?.type === 'screen-audio') {
+                // Screen share audio - emit as voice stream so it gets played
+                logDebug('received screen-audio track, emitting as remoteVoiceStream');
+                this.emit('remoteVoiceStream', new MediaStream(audioTracks));
+                this.remoteVoiceTracks.push(...audioTracks);
+            } else if (trackInfo?.type === 'voice' || !trackInfo?.type) {
+                // Regular voice audio
+                logDebug('received voice track, emitting as remoteVoiceStream');
+                this.emit('remoteVoiceStream', remoteStream);
+                this.remoteVoiceTracks.push(...audioTracks);
+            } else {
+                logDebug('unexpected audio track type:', trackInfo?.type);
+            }
+        }
+
+        // Handle video tracks based on type
+        if (videoTracks.length > 0) {
+            if (trackInfo?.type === 'video') {
+                logDebug('received video track, emitting as remoteVideoStream');
+                this.emit('remoteVideoStream', remoteStream);
+                this.remoteVideoTracks.push(videoTracks[0]);
+            } else if (trackInfo?.type === 'screen') {
+                logDebug('received screen track, emitting as remoteScreenStream');
+                this.emit('remoteScreenStream', remoteStream);
+                this.remoteScreenTrack = videoTracks[0];
+                if (origin === 'sfu') {
+                    this.sfuRemoteScreenTrack = videoTracks[0];
+                }
+            } else {
+                logDebug('unexpected video track type:', trackInfo?.type);
+            }
+        }
     }
 
     public destroy() {
@@ -736,14 +945,17 @@ export default class CallsClient extends EventEmitter {
             this.stream.removeTrack(oldTrack);
             this.stream.addTrack(newTrack);
             newTrack.enabled = isEnabled;
-            if (isEnabled) {
+            if (isEnabled && !this.p2pActive) {
                 // voiceTrackAdded must be true if the track is enabled.
                 logDebug('replacing track to peer', newTrack.id);
                 this.peer.replaceTrack(oldTrack.id, newTrack);
             } else {
+                // Not sending over the SFU (muted, or media goes peer to peer): the new
+                // track is added to the SFU peer when needed.
                 this.voiceTrackAdded = false;
             }
             this.audioTrack = newTrack;
+            this.syncP2PMedia();
         } catch (err) {
             logErr('setAudioInputDevice: failed to switch audio input device', device.deviceId, err);
             throw err;
@@ -811,17 +1023,20 @@ export default class CallsClient extends EventEmitter {
 
             newTrack.enabled = isEnabled;
             if (isEnabled) {
-                // videoTrackAdded must be true if the track is enabled.
-                logDebug('replacing track to peer', newTrack.id);
-                this.peer.replaceTrack(videoTrack.id, newTrack);
+                if (!this.p2pActive) {
+                    // videoTrackAdded must be true if the track is enabled.
+                    logDebug('replacing track to peer', newTrack.id);
+                    this.peer.replaceTrack(videoTrack.id, newTrack);
 
-                // Keep track of the new ID the sender holds so a later stopVideo
-                // can replace it (the peer re-keys its senders map by track ID).
-                this.videoSenderTrackID = newTrack.id;
+                    // Keep track of the new ID the sender holds so a later stopVideo
+                    // can replace it (the peer re-keys its senders map by track ID).
+                    this.videoSenderTrackID = newTrack.id;
+                }
                 this.emit('localVideoStream', newStream);
             } else {
                 this.videoTrackAdded = false;
             }
+            this.syncP2PMedia();
         } catch (err) {
             logErr('setVideoInputDevice: failed to switch video input device', device.deviceId, err);
             throw err;
@@ -853,6 +1068,9 @@ export default class CallsClient extends EventEmitter {
         this.rtcMonitor?.stop();
 
         this.closed = true;
+        this.p2p?.destroy();
+        this.p2p = null;
+        this.p2pActive = false;
         if (this.peer) {
             this.getStats().then((stats) => {
                 // Flush logs with stats to accumulated buffer
@@ -894,12 +1112,15 @@ export default class CallsClient extends EventEmitter {
             return;
         }
 
-        logDebug('replacing track to peer', null);
+        if (!this.p2pActive) {
+            logDebug('replacing track to peer', null);
 
-        // @ts-ignore: we actually mean (and need) to pass null here
-        this.peer.replaceTrack(this.audioTrack.id, null);
+            // @ts-ignore: we actually mean (and need) to pass null here
+            this.peer.replaceTrack(this.audioTrack.id, null);
+        }
 
         this.audioTrack.enabled = false;
+        this.syncP2PMedia();
 
         this.emit('mute');
 
@@ -931,15 +1152,19 @@ export default class CallsClient extends EventEmitter {
         this.rtcMonitor?.clearCache();
 
         if (this.audioTrack) {
-            if (this.voiceTrackAdded) {
-                logDebug('replacing track to peer', this.audioTrack.id);
-                this.peer.replaceTrack(this.audioTrack.id, this.audioTrack);
-            } else if (this.stream) {
-                logDebug('adding track to peer', this.audioTrack.id, this.stream.id);
-                await this.peer.addTrack(this.audioTrack, this.stream);
-                this.voiceTrackAdded = true;
+            // When the media goes peer to peer the SFU peer is updated if we fall back.
+            if (!this.p2pActive) {
+                if (this.voiceTrackAdded) {
+                    logDebug('replacing track to peer', this.audioTrack.id);
+                    this.peer.replaceTrack(this.audioTrack.id, this.audioTrack);
+                } else if (this.stream) {
+                    logDebug('adding track to peer', this.audioTrack.id, this.stream.id);
+                    await this.peer.addTrack(this.audioTrack, this.stream);
+                    this.voiceTrackAdded = true;
+                }
             }
             this.audioTrack.enabled = true;
+            this.syncP2PMedia();
         }
 
         this.emit('unmute');
@@ -998,6 +1223,8 @@ export default class CallsClient extends EventEmitter {
             screenStream = new MediaStream([screenTrack]);
         }
 
+        this.localScreenAudioTrack = screenAudioTrack || null;
+        this.localScreenStream = screenStream;
         this.streams.push(screenStream);
 
         screenTrack.onended = async () => {
@@ -1006,21 +1233,27 @@ export default class CallsClient extends EventEmitter {
             }
 
             this.localScreenTrack = null;
+            this.localScreenAudioTrack = null;
+            this.localScreenStream = null;
+            this.syncP2PMedia();
 
             if (!this.ws || !this.peer) {
                 return;
             }
 
-            try {
-                await this.peer.removeTrack(screenTrack.id);
-                if (screenAudioTrack) {
-                    await this.peer.removeTrack(screenAudioTrack.id);
+            if (this.screenOnSFU) {
+                this.screenOnSFU = false;
+                try {
+                    await this.peer.removeTrack(screenTrack.id);
+                    if (screenAudioTrack) {
+                        await this.peer.removeTrack(screenAudioTrack.id);
+                    }
+                } catch (err) {
+                    logErr('screenTrack.onended: failed to remove track', err);
                 }
-            } catch (err) {
-                logErr('screenTrack.onended: failed to remove track', err);
             }
 
-            this.ws.send('screen_off');
+            this.ws?.send('screen_off');
         };
 
         logDebug(`adding screen stream to peer: ${screenStream.id}`);
@@ -1035,6 +1268,21 @@ export default class CallsClient extends EventEmitter {
 
         // Smoothness over text sharpness: we mostly share game footage.
         screenTrack.contentHint = 'motion';
+
+        // When the media goes peer to peer the screen is sent through the P2P
+        // connection instead and only added to the SFU peer if we fall back.
+        this.syncP2PMedia();
+        if (!this.p2pActive) {
+            await this.sendScreenOverSFU(screenStream, screenTrack);
+        }
+    }
+
+    private async sendScreenOverSFU(screenStream: MediaStream, screenTrack: MediaStreamTrack) {
+        if (!this.peer) {
+            return;
+        }
+
+        this.screenOnSFU = true;
 
         // Always send a fallback track (VP8 encoded) for receivers that don't yet support AV1.
         // addStream maps opts by getTracks() index, and Chromium lists audio
@@ -1172,6 +1420,29 @@ export default class CallsClient extends EventEmitter {
             localVideoTrack = await this.initBgBackgroundTrack(this.localVideoStream, bgBlurData);
         }
 
+        // When the media goes peer to peer the SFU peer is updated if we fall back.
+        if (!this.p2pActive) {
+            await this.sendVideoOverSFU(localVideoTrack);
+        }
+        this.syncP2PMedia();
+
+        this.emit('localVideoStream', this.localVideoStream);
+
+        this.ws.send('video_on', {
+            data: JSON.stringify({
+                videoStreamID: this.localVideoStream.id,
+            }),
+        });
+        this.emit('video_on');
+
+        return this.localVideoStream;
+    }
+
+    private async sendVideoOverSFU(localVideoTrack: MediaStreamTrack) {
+        if (!this.peer || !this.localVideoStream) {
+            return;
+        }
+
         if (this.videoTrackAdded) {
             // The sender already exists from a previous startVideo. Its track may
             // currently be null (video was stopped) or a now-stopped track, so we
@@ -1189,17 +1460,6 @@ export default class CallsClient extends EventEmitter {
             this.videoTrackAdded = true;
         }
         this.videoSenderTrackID = localVideoTrack.id;
-
-        this.emit('localVideoStream', this.localVideoStream);
-
-        this.ws.send('video_on', {
-            data: JSON.stringify({
-                videoStreamID: this.localVideoStream.id,
-            }),
-        });
-        this.emit('video_on');
-
-        return this.localVideoStream;
     }
 
     public stopVideo() {
@@ -1210,8 +1470,11 @@ export default class CallsClient extends EventEmitter {
         // Detach the track from the sender so we stop transmitting video. We keep
         // the sender itself around (videoTrackAdded stays true) to avoid a
         // renegotiation when video is started again.
-        // @ts-ignore: we actually mean (and need) to pass null here
-        this.peer.replaceTrack(this.videoSenderTrackID, null);
+        // There is no sender if the video was only ever sent peer to peer.
+        if (this.videoSenderTrackID) {
+            // @ts-ignore: we actually mean (and need) to pass null here
+            this.peer.replaceTrack(this.videoSenderTrackID, null);
+        }
 
         // Fully stop and release the camera device so its hardware indicator (LED)
         // turns off. Simply disabling the track (enabled = false) keeps the device
@@ -1226,6 +1489,7 @@ export default class CallsClient extends EventEmitter {
             track.dispatchEvent(new Event('ended'));
         }
         this.localVideoStream = null;
+        this.syncP2PMedia();
 
         this.emit('video_off');
         this.ws.send('video_off');

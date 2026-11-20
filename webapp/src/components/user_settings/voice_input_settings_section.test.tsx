@@ -40,7 +40,8 @@ describe('VoiceInputSettingsSection', () => {
     it('defaults to noise suppression on and push-to-talk off', () => {
         renderSection();
 
-        expect(screen.getByText(/Noise suppression: on\. Input mode: voice activity/)).toBeInTheDocument();
+        expect(screen.getByTestId('voice-input-summary-noise')).toHaveTextContent('Noise suppression: On');
+        expect(screen.getByTestId('voice-input-summary-mode')).toHaveTextContent('Input mode: voice activity');
         open();
 
         expect(screen.getByTestId('noise-suppression-checkbox')).toBeChecked();
@@ -73,7 +74,8 @@ describe('VoiceInputSettingsSection', () => {
 
         fireEvent.click(screen.getByTestId('ptt-key-button'));
         fireEvent.keyDown(window, {code: 'KeyV'});
-        expect(screen.getByTestId('ptt-key-button')).toHaveTextContent('V');
+        expect(screen.getByTestId('ptt-key-chip')).toHaveTextContent('V');
+        expect(screen.getByTestId('ptt-key-button')).toHaveTextContent('Change');
 
         fireEvent.click(screen.getByText('Save'));
 
@@ -88,7 +90,8 @@ describe('VoiceInputSettingsSection', () => {
         fireEvent.click(screen.getByTestId('ptt-key-button'));
         fireEvent.keyDown(window, {code: 'Escape'});
 
-        expect(screen.getByTestId('ptt-key-button')).toHaveTextContent('Click to set a key');
+        expect(screen.getByTestId('ptt-key-chip')).toHaveTextContent('Not set');
+        expect(screen.getByTestId('ptt-key-button')).toHaveTextContent('Set key');
     });
 
     it('cannot save push-to-talk without a key', () => {
@@ -126,5 +129,57 @@ describe('VoiceInputSettingsSection', () => {
         fireEvent.click(screen.getByText('Save'));
 
         expect(getPushToTalkConfig()).toEqual({enabled: false, code: 'KeyV'});
+    });
+
+    it('shows the current noise suppression state in the collapsed summary, also after it was turned off', () => {
+        renderSection();
+        open();
+        fireEvent.click(screen.getByTestId('noise-suppression-checkbox'));
+        fireEvent.click(screen.getByText('Save'));
+
+        expect(screen.getByTestId('voice-input-summary-noise')).toHaveTextContent('Noise suppression: Off');
+    });
+
+    it('shows the push-to-talk key in the summary', () => {
+        renderSection();
+        open();
+        fireEvent.click(screen.getByTestId('input-mode-push-to-talk'));
+        fireEvent.click(screen.getByTestId('ptt-key-button'));
+        fireEvent.keyDown(window, {code: 'ControlLeft'});
+        fireEvent.click(screen.getByText('Save'));
+
+        expect(screen.getByTestId('voice-input-summary-mode')).toHaveTextContent('push to talk (hold Left Ctrl)');
+    });
+
+    it('makes the capture state obvious and Esc cancels it without changing the key', () => {
+        renderSection();
+        open();
+        fireEvent.click(screen.getByTestId('input-mode-push-to-talk'));
+        fireEvent.click(screen.getByTestId('ptt-key-button'));
+        fireEvent.keyDown(window, {code: 'KeyV'});
+
+        fireEvent.click(screen.getByTestId('ptt-key-button'));
+        expect(screen.getByTestId('ptt-key-chip')).toHaveTextContent('Press a key…');
+        expect(screen.getByTestId('ptt-key-button')).toHaveTextContent('Cancel');
+        expect(screen.getByTestId('ptt-capture-hint')).toHaveTextContent('Esc cancels');
+
+        fireEvent.keyDown(window, {code: 'Escape'});
+        expect(screen.getByTestId('ptt-key-chip')).toHaveTextContent('V');
+    });
+
+    it('test indicator lights up while the push-to-talk key is held', () => {
+        renderSection();
+        open();
+        fireEvent.click(screen.getByTestId('input-mode-push-to-talk'));
+        fireEvent.click(screen.getByTestId('ptt-key-button'));
+        fireEvent.keyDown(window, {code: 'KeyV'});
+
+        expect(screen.getByTestId('ptt-test-indicator')).toHaveTextContent('Not pressed');
+        fireEvent.keyDown(window, {code: 'KeyV'});
+        expect(screen.getByTestId('ptt-test-indicator')).toHaveTextContent('Key pressed');
+        fireEvent.keyDown(window, {code: 'KeyB'});
+        expect(screen.getByTestId('ptt-test-indicator')).toHaveTextContent('Key pressed');
+        fireEvent.keyUp(window, {code: 'KeyV'});
+        expect(screen.getByTestId('ptt-test-indicator')).toHaveTextContent('Not pressed');
     });
 });

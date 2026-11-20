@@ -4,9 +4,10 @@
 import React, {useEffect, useState} from 'react';
 import {useIntl} from 'react-intl';
 import type {default as CallsClient, ScreenQualityInfo} from 'src/client';
-import {formatQualityLabel, sameShareQuality, type ScreenShareQuality} from 'src/screen_share_quality';
+import {sameShareQuality, type ScreenShareQuality} from 'src/screen_share_quality';
 import styled from 'styled-components';
 
+import {qualityInfoLabel} from './label';
 import ScreenShareQualityPicker from './picker';
 
 type Props = {
@@ -46,15 +47,17 @@ export default function ScreenShareQualityLive({getClient, onDark = false}: Prop
 
     const change = (next: ScreenShareQuality) => {
         // Reflect the choice in the form right away, the client reports the applied values back.
-        setInfo({...info, quality: next});
+        setInfo({...info, quality: next, auto: next.auto ? info.auto : null});
         getClient()?.setScreenQuality(next);
     };
+
+    const label = qualityInfoLabel(info, formatMessage);
 
     return (
         <Root $onDark={onDark}>
             <Summary>
                 <Label data-testid='share-quality-label'>
-                    {formatQualityLabel(info.quality, info.bitrateMbps, info.captured)}
+                    {label}
                 </Label>
                 <button
                     className='style--none'

@@ -14,6 +14,8 @@ Implements phases 1 and 2 of [`bufy-discord-ux.md`](bufy-discord-ux.md) for **DM
 
 ## Voice input
 
+> Update: noise suppression switch + shortcut list + "PTT: key" hint in the widget menus, clearer settings summary and key capture/test: see [`bufy-auto-quality.md`](bufy-auto-quality.md).
+
 - **Noise suppression** (Settings > Calls > Voice input, default on). Applied **on the fly**: saving calls
   `track.applyConstraints({noiseSuppression})` on the live mic track in the window that owns the call (no
   renegotiation, same track in SFU and P2P mode). If the browser refuses, the value is used the next time a mic

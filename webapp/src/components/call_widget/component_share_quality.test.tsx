@@ -10,6 +10,7 @@ import React from 'react';
 import {createIntl, RawIntlProvider} from 'react-intl';
 import {Provider} from 'react-redux';
 import type CallsClient from 'src/client';
+import {STORAGE_CALLS_SHARE_QUALITY_KEY} from 'src/constants';
 import {defaultShareQuality, getShareQuality, setShareQuality} from 'src/screen_share_quality';
 import {mockStore} from 'src/testUtils';
 
@@ -164,6 +165,7 @@ describe('CallWidget screen share quality', () => {
             renderWidget();
             clickShare();
 
+            fireEvent.change(screen.getByTestId('share-quality-modal-mode'), {target: {value: 'manual'}});
             fireEvent.change(screen.getByTestId('share-quality-modal-resolution'), {target: {value: '4k'}});
             fireEvent.change(screen.getByTestId('share-quality-modal-fps'), {target: {value: '30'}});
             fireEvent.change(screen.getByTestId('share-quality-modal-content'), {target: {value: 'text'}});
@@ -172,13 +174,13 @@ describe('CallWidget screen share quality', () => {
             });
 
             expect(client.shareScreen).toHaveBeenCalledTimes(1);
-            expect(client.shareScreen).toHaveBeenCalledWith('', expect.any(Boolean), {resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: null});
-            expect(getShareQuality()).toEqual({resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: null});
+            expect(client.shareScreen).toHaveBeenCalledWith('', expect.any(Boolean), {auto: false, resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: null});
+            expect(getShareQuality()).toEqual({auto: false, resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: null});
             expect(screen.queryByTestId('share-quality-modal')).not.toBeInTheDocument();
         });
 
         test('pre-selects the last choice', () => {
-            setShareQuality({resolution: '1440p', fps: 15, content: 'text', manualBitrateMbps: 12});
+            setShareQuality({auto: false, resolution: '1440p', fps: 15, content: 'text', manualBitrateMbps: 12});
             renderWidget();
             clickShare();
 
@@ -188,11 +190,22 @@ describe('CallWidget screen share quality', () => {
             expect(screen.getByTestId('share-quality-modal-bitrate-value')).toHaveTextContent('12 Mbps');
         });
 
-        test('starts with the defaults when nothing was chosen before', () => {
+        test('starts with Auto selected when nothing was chosen before (new user)', () => {
             renderWidget();
             clickShare();
 
-            expect((screen.getByTestId('share-quality-modal-resolution') as HTMLSelectElement).value).toBe(defaultShareQuality.resolution);
+            expect((screen.getByTestId('share-quality-modal-mode') as HTMLSelectElement).value).toBe('auto');
+            expect(screen.getByTestId('share-quality-modal-auto-hint')).toBeInTheDocument();
+            expect(screen.queryByTestId('share-quality-modal-resolution')).not.toBeInTheDocument();
+            expect(defaultShareQuality.auto).toBe(true);
+        });
+
+        test('keeps a manual choice stored before Auto existed', () => {
+            window.localStorage.setItem(STORAGE_CALLS_SHARE_QUALITY_KEY, JSON.stringify({resolution: '1080p', fps: 60, content: 'game', manualBitrateMbps: null}));
+            renderWidget();
+            clickShare();
+
+            expect((screen.getByTestId('share-quality-modal-mode') as HTMLSelectElement).value).toBe('manual');
             expect(screen.getByTestId('share-quality-modal-auto-bitrate')).toBeInTheDocument();
         });
 
@@ -211,9 +224,10 @@ describe('CallWidget screen share quality', () => {
 
     describe('while sharing', () => {
         const liveInfo = {
-            quality: {resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null},
+            quality: {auto: false, resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null},
             bitrateMbps: 12,
             captured: {width: 2560, height: 1440},
+            auto: null,
         };
 
         beforeEach(() => {
@@ -242,7 +256,7 @@ describe('CallWidget screen share quality', () => {
 
             fireEvent.change(screen.getByTestId('share-quality-live-resolution'), {target: {value: '720p'}});
 
-            expect(client.setScreenQuality).toHaveBeenCalledWith({resolution: '720p', fps: 60, content: 'game', manualBitrateMbps: null});
+            expect(client.setScreenQuality).toHaveBeenCalledWith({auto: false, resolution: '720p', fps: 60, content: 'game', manualBitrateMbps: null});
             expect(client.shareScreen).not.toHaveBeenCalled();
         });
 
@@ -255,6 +269,78 @@ describe('CallWidget screen share quality', () => {
 
             fireEvent.change(screen.getByTestId('share-quality-live-bitrate-slider'), {target: {value: '20'}});
             expect(client.setScreenQuality).toHaveBeenLastCalledWith(expect.objectContaining({manualBitrateMbps: 20}));
+        });
+    });
+
+    describe('Auto quality and the sharing state', () => {
+        const autoInfo = {
+            quality: {auto: true, resolution: '1080p', fps: 60, content: 'game', manualBitrateMbps: null},
+            bitrateMbps: 7.5,
+            captured: {width: 1920, height: 1080},
+            auto: {resolution: '1080p', fps: 60, limited: 'bandwidth'},
+        };
+
+        test('the sharer\'s quality label shows the Auto level and what limits it', () => {
+            client.getScreenQualityInfo = jest.fn(() => autoInfo);
+            renderWidget({screenSharingSession: mine});
+            expect(screen.getByTestId('share-quality-label')).toHaveTextContent('Auto · 1080p60 · 7.5 Mbps (limited: bandwidth)');
+        });
+
+        test('the live panel offers Auto and manual', () => {
+            client.getScreenQualityInfo = jest.fn(() => autoInfo);
+            renderWidget({screenSharingSession: mine});
+            fireEvent.click(screen.getByTestId('share-quality-toggle'));
+
+            expect((screen.getByTestId('share-quality-live-mode') as HTMLSelectElement).value).toBe('auto');
+            fireEvent.change(screen.getByTestId('share-quality-live-mode'), {target: {value: 'manual'}});
+            expect(client.setScreenQuality).toHaveBeenCalledWith(expect.objectContaining({auto: false}));
+        });
+
+        test('a red strip with a Stop button is visible without opening any menu while the user shares', () => {
+            client.unshareScreen = jest.fn();
+            renderWidget({screenSharingSession: mine});
+
+            expect(screen.getByTestId('calls-widget-sharing-strip')).toHaveTextContent('Sharing your screen');
+            fireEvent.click(screen.getByTestId('calls-widget-sharing-strip-stop'));
+            expect(client.unshareScreen).toHaveBeenCalledTimes(1);
+        });
+
+        test('no sharing strip when not sharing, or when somebody else shares', () => {
+            renderWidget();
+            expect(screen.queryByTestId('calls-widget-sharing-strip')).not.toBeInTheDocument();
+        });
+
+        test('no sharing strip for a viewer', () => {
+            renderWidget({screenSharingSession: theirs});
+            expect(screen.queryByTestId('calls-widget-sharing-strip')).not.toBeInTheDocument();
+        });
+    });
+
+    describe('voice input hints', () => {
+        test('the widget menu has a noise suppression switch that applies right away, and the shortcut list', () => {
+            client.applyNoiseSuppression = jest.fn();
+            (window as any).WebappUtils = {openUserSettings: jest.fn()};
+            renderWidget();
+            fireEvent.click(document.getElementById('calls-widget-toggle-menu-button')!);
+
+            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('On');
+            fireEvent.click(screen.getByTestId('noise-suppression-toggle'));
+            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('Off');
+            expect(client.applyNoiseSuppression).toHaveBeenCalled();
+
+            fireEvent.click(screen.getByTestId('shortcuts-toggle'));
+            expect(screen.getByTestId('shortcuts-list')).toBeInTheDocument();
+        });
+
+        test('shows PTT: <key> only while push to talk is on', () => {
+            window.localStorage.setItem('calls_push_to_talk', JSON.stringify({enabled: true, code: 'KeyV'}));
+            renderWidget();
+            expect(screen.getByTestId('ptt-hint')).toHaveTextContent('PTT: V');
+        });
+
+        test('no PTT hint by default', () => {
+            renderWidget();
+            expect(screen.queryByTestId('ptt-hint')).not.toBeInTheDocument();
         });
     });
 });

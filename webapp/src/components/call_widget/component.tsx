@@ -61,6 +61,7 @@ import ScreenShareQualityModal from 'src/components/screen_share_quality/modal';
 import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
 import SpeakingSync from 'src/components/use_speaking';
 import {UserVolumeSlider} from 'src/components/user_volume_control';
+import {NoiseSuppressionMenuItem, PushToTalkHint, ShortcutsMenuItem} from 'src/components/voice_input_menu';
 import {
     CallAlertConfigs,
     CallRecordingDisclaimerStrings,
@@ -70,6 +71,7 @@ import {
 } from 'src/constants';
 import {logDebug, logErr} from 'src/log';
 import {isPushToTalkActive} from 'src/push_to_talk';
+import {serveScreenShareBridge} from 'src/screen_share_bridge';
 import {type ScreenShareQuality} from 'src/screen_share_quality';
 import {reconcileWatch, startWatching, streamView, type WatchState} from 'src/screen_watch';
 import {
@@ -105,7 +107,7 @@ import {
     untranslatable,
 } from 'src/utils';
 import {serverDismissedAt} from 'src/utils/clock_skew';
-import {getPushToTalkConfig, keyCodeLabel} from 'src/voice_input_prefs';
+import {getPushToTalkConfig, keyCodeLabel, onVoiceInputPrefsChanged} from 'src/voice_input_prefs';
 import styled, {css} from 'styled-components';
 
 import {CallParticipantAvatar} from './call_participant_avatar';
@@ -539,6 +541,12 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         this.unsubscribers.push(() => {
             document.removeEventListener('keydown', this.handleKBShortcuts, true);
         });
+
+        // The mute button / shortcut hints follow the voice input settings (push to talk on or off).
+        this.unsubscribers.push(onVoiceInputPrefsChanged(() => this.forceUpdate()));
+
+        // Other windows (the desktop app's main window) can stop the share and show its quality.
+        this.unsubscribers.push(serveScreenShareBridge(() => window.callsClient));
 
         // set cross-window actions
         window.callActions = {
@@ -1304,6 +1312,31 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         );
     };
 
+    // While the current user shares their screen: a red strip with a Stop button that is always visible,
+    // so it is obvious without opening any menu.
+    renderSharingStrip = () => {
+        const sharingID = this.props.screenSharingSession?.session_id;
+        if (!sharingID || sharingID !== this.props.currentSession?.session_id) {
+            return null;
+        }
+        const {formatMessage} = this.props.intl;
+
+        return (
+            <SharingStrip data-testid='calls-widget-sharing-strip'>
+                <SharingDot/>
+                <span>{formatMessage({defaultMessage: 'Sharing your screen'})}</span>
+                <SharingStop
+                    id='calls-widget-sharing-strip-stop'
+                    data-testid='calls-widget-sharing-strip-stop'
+                    className='style--none'
+                    onClick={() => this.onShareScreenToggle()}
+                >
+                    {formatMessage({defaultMessage: 'Stop'})}
+                </SharingStop>
+            </SharingStrip>
+        );
+    };
+
     renderScreenShareButton = () => {
         const {formatMessage} = this.props.intl;
         const sharingID = this.props.screenSharingSession?.session_id;
@@ -1866,6 +1899,9 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                     {this.renderDevices('audiooutput')}
                     {this.renderDevices('audioinput')}
                     {this.props.enableVideo && this.renderDevices('videoinput')}
+                    { divider }
+                    <NoiseSuppressionMenuItem/>
+                    <ShortcutsMenuItem isDM={isDMChannel(this.props.channel)}/>
                     { divider }
                     {showScreenShareItem && this.renderScreenSharingMenuItem()}
                     {showScreenShareItem && divider}
@@ -2500,6 +2536,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                     mirrorVideo={localStorage.getItem(STORAGE_CALLS_MIRROR_VIDEO_KEY) === 'true'}
                     singleSession={selfOnly}
                     isLive={Boolean(selfSession) && this.props.screenSharingSession?.session_id === selfSession?.session_id}
+                    liveRing={Boolean(selfSession) && this.props.screenSharingSession?.session_id === selfSession?.session_id}
                     testID='calls-widget-profile-self'
                 />
                 }
@@ -2725,6 +2762,13 @@ export default class CallWidget extends React.PureComponent<Props, State> {
 
                     {this.props.enableVideo && this.renderMiddleBar() }
 
+                    {this.renderSharingStrip()}
+
+                    {/* Push to talk is on: say which key opens the mic (empty when it is off). */}
+                    <div style={{display: 'flex', justifyContent: 'center', marginBottom: '4px'}}>
+                        <PushToTalkHint/>
+                    </div>
+
                     <div
                         className='calls-widget-bottom-bar'
                         style={this.style.bottomBar}
@@ -2766,7 +2810,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                             // eslint-disable-next-line no-undefined
                             onToggle={noInputDevices ? undefined : this.onMuteToggle}
                             // eslint-disable-next-line no-undefined
-                            shortcut={noInputDevices || noAudioPermissions ? undefined : reverseKeyMappings.widget[MUTE_UNMUTE][0]}
+                            shortcut={noInputDevices || noAudioPermissions || isPushToTalkActive() ? undefined : reverseKeyMappings.widget[MUTE_UNMUTE][0]}
                             tooltipText={muteTooltipText}
                             tooltipSubtext={muteTooltipSubtext}
                             bgColor={this.isMuted() ? '' : 'rgba(61, 184, 135, 0.16)'}
@@ -3035,6 +3079,44 @@ const WidgetProfileContainer = styled.div<{$videoView: boolean, $singleSession?:
   `}
 `;
 
+const SharingStrip = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 4px;
+  padding: 4px 4px 4px 10px;
+  border-radius: 4px;
+  background: var(--dnd-indicator);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+
+  & > span:nth-child(2) {
+    flex: 1;
+  }
+`;
+
+const SharingDot = styled.span`
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: white;
+`;
+
+const SharingStop = styled.button`
+&&& {
+  padding: 1px 10px;
+  border-radius: 4px;
+  background: white;
+  color: var(--dnd-indicator);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+`;
+
 const LiveBadgeWrap = styled.div`
   position: absolute;
   bottom: 4px;
@@ -3102,6 +3184,9 @@ type CallsWidgetProfileProps = {
     ringing?: boolean;
     isLive?: boolean;
 
+    // A red ring instead of the speaking ring: this is the current user and they are sharing their screen.
+    liveRing?: boolean;
+
     // Only for the other participant: toggles their local volume slider.
     volumeOpen?: boolean;
     onVolumeToggle?: () => void;
@@ -3137,7 +3222,7 @@ const CallsWidgetProfile = (props: CallsWidgetProfileProps) => {
                 size={40}
                 border={false}
                 url={Client4.getProfilePictureUrl(props.profile.id, props.profile.last_picture_update)}
-                {...speakingRing(props.isSpeaking)}
+                {...(props.liveRing ? {borderGlowWidth: 3, borderGlowColor: '#D24B4E'} : speakingRing(props.isSpeaking))}
                 className={props.ringing ? 'pulsingAnimation' : ''}
             />
             }

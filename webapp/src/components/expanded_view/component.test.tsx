@@ -301,12 +301,13 @@ describe('ExpandedView', () => {
             expect(screen.getByTestId('share-quality-modal')).toBeInTheDocument();
             expect(getScreenStream).not.toHaveBeenCalled();
 
+            fireEvent.change(screen.getByTestId('share-quality-modal-mode'), {target: {value: 'manual'}});
             fireEvent.change(screen.getByTestId('share-quality-modal-resolution'), {target: {value: '1440p'}});
             await act(async () => {
                 fireEvent.click(screen.getByTestId('share-quality-confirm'));
             });
 
-            const quality = {resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null};
+            const quality = {auto: false, resolution: '1440p', fps: 60, content: 'game', manualBitrateMbps: null};
             expect(getScreenStream).toHaveBeenCalledWith('', expect.any(Boolean), quality);
             expect(setScreenStream).toHaveBeenCalledWith(stream, quality);
         });

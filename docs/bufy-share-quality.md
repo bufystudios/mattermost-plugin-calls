@@ -12,6 +12,9 @@ Decided in [`bufy-discord-ux.md`](bufy-discord-ux.md) (team decisions); P2P back
 | Settings > Calls > "Screen share quality" (next to Voice input) | Edit the default. The default **is** the last choice (one stored value), so a change in the picker or while sharing becomes the new default. |
 | While sharing (widget panel and pop out preview) | A line `1440p60 · 12 Mbps` and a **Quality** link that opens the compact form; changes apply live, no re-share. |
 
+> **Update (v1.12.11-bufy.aq.1)**: the picker now has **Auto** (default for new users, adapts live to the connection and the computer) next to Manual, see
+> [`bufy-auto-quality.md`](bufy-auto-quality.md). Stored manual choices stay manual. Everything below describes **Manual**.
+
 Options: resolution 720p / 1080p / 1440p / 4K (3840x2160) / Source; fps 15 / 30 / 60; content Game / Text; manual bitrate (checkbox +
 1-50 Mbps slider; off = automatic). Default: 1080p, 60 fps, Game, automatic. Viewers have no quality UI (no simulcast).
 

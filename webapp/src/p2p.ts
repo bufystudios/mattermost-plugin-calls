@@ -17,6 +17,7 @@ import {
     type CaptureSize,
     getShareQuality,
     pickP2PScreenCodec,
+    type ScreenSenderExtra,
     type ScreenSenderSettings,
     type ScreenShareQuality,
 } from './screen_share_quality';
@@ -137,6 +138,7 @@ export class P2PController extends EventEmitter {
     private screenQuality: ScreenShareQuality | null = null;
     private screenCapture: Partial<CaptureSize> | null = null;
     private screenSettings: ScreenSenderSettings | null = null;
+    private screenExtra: ScreenSenderExtra | null = null;
 
     constructor(mySessionID: string, cfg: P2PConfig) {
         super();
@@ -168,9 +170,11 @@ export class P2PController extends EventEmitter {
 
     // Sets the quality (and the real capture size) of the local screen share and
     // applies it right away when connected. Safe to call at any time.
-    public setScreenQuality(quality: ScreenShareQuality | null, captured?: Partial<CaptureSize> | null) {
+    // `extra` carries what Auto adds at runtime (bitrate cap, encoder downscale).
+    public setScreenQuality(quality: ScreenShareQuality | null, captured?: Partial<CaptureSize> | null, extra?: ScreenSenderExtra | null) {
         this.screenQuality = quality;
         this.screenCapture = captured ?? null;
+        this.screenExtra = extra ?? null;
         if (!quality) {
             this.screenSettings = null;
             return;
@@ -178,6 +182,12 @@ export class P2PController extends EventEmitter {
         if (this.state === 'p2p') {
             this.applySenderParams();
         }
+    }
+
+    // The sender that carries the local screen (empty when nothing is being sent), for stats polling.
+    public getScreenSenders(): RTCRtpSender[] {
+        const sender = this.transceivers.screen?.sender;
+        return sender && sender.track ? [sender] : [];
     }
 
     // Settings last applied to the screen sender (bitrate, ...), null when nothing is being sent.
@@ -666,6 +676,7 @@ export class P2PController extends EventEmitter {
             const settings = await applyQualityToSender(sender, quality, {
                 codec: 'vp8',
                 captured,
+                extra: this.screenExtra,
                 chooseCodec: (negotiated) => pickP2PScreenCodec({
                     quality,
                     captured,

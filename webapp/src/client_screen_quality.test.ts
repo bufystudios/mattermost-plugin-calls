@@ -53,7 +53,7 @@ const makeSender = (codecs: Array<Record<string, unknown>> = []) => {
     return sender;
 };
 
-const q = (over: Partial<ScreenShareQuality> = {}): ScreenShareQuality => ({...defaultShareQuality, ...over});
+const q = (over: Partial<ScreenShareQuality> = {}): ScreenShareQuality => ({...defaultShareQuality, auto: false, ...over});
 
 describe('CallsClient screen share quality', () => {
     let client: any;
@@ -288,7 +288,7 @@ describe('CallsClient screen share quality', () => {
 
             const track = screenTrack('screen1', {width: 2560, height: 1440});
             await client.setScreenStream(new FakeMediaStream([track]), q({resolution: '1440p', fps: 60}));
-            expect(p2p.setScreenQuality).toHaveBeenLastCalledWith(expect.objectContaining({resolution: '1440p', fps: 60}), {width: 2560, height: 1440});
+            expect(p2p.setScreenQuality).toHaveBeenLastCalledWith(expect.objectContaining({resolution: '1440p', fps: 60}), {width: 2560, height: 1440}, null);
 
             await client.setScreenQuality(q({resolution: '1080p', fps: 30, content: 'text'}));
             expect(p2p.setScreenQuality).toHaveBeenLastCalledWith(expect.objectContaining({resolution: '1080p', fps: 30, content: 'text'}), expect.anything());

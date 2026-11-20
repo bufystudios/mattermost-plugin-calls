@@ -56,6 +56,7 @@ import ScreenShareQualityModal from 'src/components/screen_share_quality/modal';
 import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
 import SpeakingSync from 'src/components/use_speaking';
 import {UserVolumeButton} from 'src/components/user_volume_control';
+import {PushToTalkHint} from 'src/components/voice_input_menu';
 import {CallAlertConfigs, DEGRADED_CALL_QUALITY_ALERT_WAIT, STORAGE_CALLS_MIRROR_VIDEO_KEY} from 'src/constants';
 import {logDebug, logErr} from 'src/log';
 import {isPushToTalkActive} from 'src/push_to_talk';
@@ -93,7 +94,7 @@ import {
     untranslatable,
 } from 'src/utils';
 import {serverDismissedAt} from 'src/utils/clock_skew';
-import {getPushToTalkConfig, keyCodeLabel} from 'src/voice_input_prefs';
+import {getPushToTalkConfig, keyCodeLabel, onVoiceInputPrefsChanged} from 'src/voice_input_prefs';
 import styled, {createGlobalStyle, css} from 'styled-components';
 
 import {CallSettingsButton} from './call_settings';
@@ -204,6 +205,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
     private readonly emojiButtonRef: React.RefObject<ReactionButtonRef>;
     private expandedRootRef = React.createRef<HTMLDivElement>();
     private pushToTalk = false;
+    private unsubscribePrefs: (() => void) | null = null;
     private screenPlayer: HTMLVideoElement | null = null;
     private callQualityBannerLocked = false;
 
@@ -770,6 +772,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
         window.addEventListener('keydown', this.handleKBShortcuts, true);
         window.addEventListener('keyup', this.handleKeyUp, true);
         window.addEventListener('blur', this.handleBlur, true);
+        this.unsubscribePrefs = onVoiceInputPrefsChanged(() => this.forceUpdate());
 
         callsClient.on('remoteScreenStream', (stream: MediaStream) => {
             this.setState({
@@ -939,6 +942,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
         window.removeEventListener('keydown', this.handleKBShortcuts, true);
         window.removeEventListener('keyup', this.handleKeyUp, true);
         window.removeEventListener('blur', this.handleBlur, true);
+        this.unsubscribePrefs?.();
         this.#unlockNavigation?.();
         this.context?.removeFirstConnectListener(this.requestCallState);
     }
@@ -1585,7 +1589,8 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                         id='calls-expanded-view-controls'
                         style={this.style.controls}
                     >
-                        <div style={{flex: '1', display: 'flex', justifyContent: 'flex-start'}}>
+                        <div style={{flex: '1', display: 'flex', justifyContent: 'flex-start', alignItems: 'center'}}>
+                            <PushToTalkHint onDark={true}/>
                             {!isDMChannel(this.props.channel) && (
                                 <ControlsButton
                                     id='calls-popout-participants-button'
@@ -1622,7 +1627,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                                 tooltipText={muteTooltipText}
                                 tooltipSubtext={muteTooltipSubtext}
                                 // eslint-disable-next-line no-undefined
-                                shortcut={noInputDevices || noAudioPermissions ? undefined : reverseKeyMappings.popout[MUTE_UNMUTE][0]}
+                                shortcut={noInputDevices || noAudioPermissions || isPushToTalkActive() ? undefined : reverseKeyMappings.popout[MUTE_UNMUTE][0]}
                                 bgColor={isMuted ? '' : 'rgba(61, 184, 135, 0.16)'}
                                 bgColorHover={isMuted ? '' : 'rgba(61, 184, 135, 0.20)'}
                                 iconFill={isMuted ? '' : 'rgba(61, 184, 135, 0.80)'}
@@ -1741,6 +1746,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                             <CallSettingsButton
                                 onLiveCaptionsToggle={this.onLiveCaptionsToggle}
                                 showLiveCaptions={this.state.showLiveCaptions}
+                                isDM={isDMChannel(this.props.channel)}
                             />
                         </div>
                         <div style={{flex: '1', display: 'flex', justifyContent: 'flex-end'}}>

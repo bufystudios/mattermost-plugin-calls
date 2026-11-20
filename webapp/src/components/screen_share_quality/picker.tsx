@@ -48,8 +48,57 @@ export default function ScreenShareQualityPicker({value, onChange, compact = fal
     const manual = value.manualBitrateMbps !== null;
     const heavy = value.resolution === '4k' || (value.resolution === 'source' && value.fps === 60);
 
+    const contentRow = (
+        <Row $compact={compact}>
+            <label htmlFor={`${idPrefix}-content`}>{formatMessage({defaultMessage: 'Content'})}</label>
+            <select
+                id={`${idPrefix}-content`}
+                data-testid={`${idPrefix}-content`}
+                value={value.content}
+                onChange={(ev) => onChange({...value, content: ev.target.value as ScreenShareQuality['content']})}
+            >
+                {shareContents.map((c) => (
+                    <option
+                        key={c}
+                        value={c}
+                    >
+                        {contentLabels[c]}
+                    </option>
+                ))}
+            </select>
+        </Row>
+    );
+
+    const modeRow = (
+        <Row $compact={compact}>
+            <label htmlFor={`${idPrefix}-mode`}>{formatMessage({defaultMessage: 'Quality mode'})}</label>
+            <select
+                id={`${idPrefix}-mode`}
+                data-testid={`${idPrefix}-mode`}
+                value={value.auto ? 'auto' : 'manual'}
+                onChange={(ev) => onChange({...value, auto: ev.target.value === 'auto'})}
+            >
+                <option value='auto'>{formatMessage({defaultMessage: 'Auto (recommended)'})}</option>
+                <option value='manual'>{formatMessage({defaultMessage: 'Manual'})}</option>
+            </select>
+        </Row>
+    );
+
+    if (value.auto) {
+        return (
+            <Root $compact={compact}>
+                {modeRow}
+                {contentRow}
+                <Hint data-testid={`${idPrefix}-auto-hint`}>
+                    {value.content === 'game' ? formatMessage({defaultMessage: 'Starts at up to 1440p and 60 fps, then follows your connection and computer: it goes down when the stream stutters or the upload is too slow and back up when there is room. Never above your screen size.'}) : formatMessage({defaultMessage: 'Starts at your screen size and up to 30 fps, then follows your connection and computer: it lowers the frame rate first to keep text sharp, then the size. Never above your screen size.'})}
+                </Hint>
+            </Root>
+        );
+    }
+
     return (
         <Root $compact={compact}>
+            {modeRow}
             <Row $compact={compact}>
                 <label htmlFor={`${idPrefix}-resolution`}>{formatMessage({defaultMessage: 'Resolution'})}</label>
                 <select
@@ -88,24 +137,7 @@ export default function ScreenShareQualityPicker({value, onChange, compact = fal
                 </select>
             </Row>
 
-            <Row $compact={compact}>
-                <label htmlFor={`${idPrefix}-content`}>{formatMessage({defaultMessage: 'Content'})}</label>
-                <select
-                    id={`${idPrefix}-content`}
-                    data-testid={`${idPrefix}-content`}
-                    value={value.content}
-                    onChange={(ev) => onChange({...value, content: ev.target.value as ScreenShareQuality['content']})}
-                >
-                    {shareContents.map((c) => (
-                        <option
-                            key={c}
-                            value={c}
-                        >
-                            {contentLabels[c]}
-                        </option>
-                    ))}
-                </select>
-            </Row>
+            {contentRow}
 
             <BitrateBox>
                 <label>

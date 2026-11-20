@@ -24,10 +24,11 @@ export default function ScreenShareQualitySettingsSection() {
         '4k': '4K',
         source: formatMessage({defaultMessage: 'source size'}),
     };
-    const summary = formatMessage({defaultMessage: 'Default: {resolution} at {fps} fps, {content}, {bitrate}.'}, {
+    const contentName = saved.content === 'game' ? formatMessage({defaultMessage: 'game / video'}) : formatMessage({defaultMessage: 'text / slides'});
+    const summary = saved.auto ? formatMessage({defaultMessage: 'Default: Auto, {content}.'}, {content: contentName}) : formatMessage({defaultMessage: 'Default: {resolution} at {fps} fps, {content}, {bitrate}.'}, {
         resolution: resolutionNames[saved.resolution],
         fps: saved.fps,
-        content: saved.content === 'game' ? formatMessage({defaultMessage: 'game / video'}) : formatMessage({defaultMessage: 'text / slides'}),
+        content: contentName,
         bitrate: saved.manualBitrateMbps === null ? formatMessage({defaultMessage: 'automatic bitrate'}) : formatMessage({defaultMessage: '{mbps} Mbps'}, {mbps: saved.manualBitrateMbps}),
     });
 

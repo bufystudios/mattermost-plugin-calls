@@ -13,6 +13,7 @@ import SpeakerIcon from 'src/components/icons/speaker_icon';
 import TickIcon from 'src/components/icons/tick';
 import UnmutedIcon from 'src/components/icons/unmuted_icon';
 import VideoOnIcon from 'src/components/icons/video_on';
+import {NoiseSuppressionMenuItem, ShortcutsMenuItem} from 'src/components/voice_input_menu';
 import {areLiveCaptionsAvailableInCurrentCall, callsConfig} from 'src/selectors';
 import type {
     MediaDevices,
@@ -104,7 +105,7 @@ const DeviceName = styled.span`
 const DeviceButton = styled.button<{$isCurrentDevice: boolean}>`
 &&& {
   display: flex;
-  background: ${({$isCurrentDevice}) => $isCurrentDevice ? 'rgba(28, 88, 217, 0.08)' : ''};
+  background: ${({$isCurrentDevice}) => ($isCurrentDevice ? 'rgba(28, 88, 217, 0.08)' : '')};
   line-height: 20px;
   padding: 8px 20px;
   align-items: center;
@@ -228,17 +229,14 @@ const Devices = ({deviceType, isActive, onToggle}: DevicesProps) => {
     }
     const label = currentDevice?.label || formatMessage({defaultMessage: 'Default'});
 
-    let devices = deviceType === 'audioinput' ?
-        audioDevices.inputs?.filter((device) => device.deviceId && device.label) :
-        audioDevices.outputs?.filter((device) => device.deviceId && device.label);
+    let devices = deviceType === 'audioinput' ? audioDevices.inputs?.filter((device) => device.deviceId && device.label) : audioDevices.outputs?.filter((device) => device.deviceId && device.label);
     if (deviceType === 'videoinput') {
         devices = videoDevices.filter((device) => device.deviceId && device.label);
     }
 
     const isDisabled = devices.length === 0;
 
-    let deviceTypeLabel = deviceType === 'audioinput' ?
-        formatMessage({defaultMessage: 'Microphone'}) : formatMessage({defaultMessage: 'Audio output'});
+    let deviceTypeLabel = deviceType === 'audioinput' ? formatMessage({defaultMessage: 'Microphone'}) : formatMessage({defaultMessage: 'Audio output'});
     if (deviceType === 'videoinput') {
         deviceTypeLabel = formatMessage({defaultMessage: 'Camera'});
     }
@@ -298,7 +296,7 @@ const ShowDevicesIcon = styled.div<{$isDisabled: boolean}>`
     svg {
       width: 16px;
       height: 16px;
-      fill: ${({$isDisabled}) => $isDisabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : 'rgba(var(--center-channel-color-rgb), 0.56)'};
+      fill: ${({$isDisabled}) => ($isDisabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : 'rgba(var(--center-channel-color-rgb), 0.56)')};
     }
 }
 `;
@@ -313,7 +311,7 @@ const DeviceTypeLabel = styled.span`
 
 const DeviceLabel = styled.span<{$isDisabled: boolean}>`
 &&& {
-  color: ${({$isDisabled}) => $isDisabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : 'rgba(var(--center-channel-color-rgb), 0.56)'};
+  color: ${({$isDisabled}) => ($isDisabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : 'rgba(var(--center-channel-color-rgb), 0.56)')};
   font-size: 12px;
   width: 100%;
   line-height: 16px;
@@ -340,7 +338,7 @@ const DeviceIcon = styled.div<{$isDisabled: boolean}>`
     svg {
       width: 16px;
       height: 16px;
-      fill: ${({$isDisabled}) => $isDisabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : 'rgba(var(--center-channel-color-rgb), 0.56)'};
+      fill: ${({$isDisabled}) => ($isDisabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : 'rgba(var(--center-channel-color-rgb), 0.56)')};
     }
     flex-shrink: 0;
 }
@@ -351,8 +349,8 @@ const DeviceTypeButton = styled.button<{$active: boolean, disabled: boolean}>`
     display: flex;
     align-items: start;
     padding: 6px 16px;
-    color: ${({disabled}) => disabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : ''};
-    background: ${({$active}) => $active ? 'rgba(var(--center-channel-color-rgb), 0.08)' : ''};
+    color: ${({disabled}) => (disabled ? 'rgba(var(--center-channel-color-rgb), 0.32)' : '')};
+    background: ${({$active}) => ($active ? 'rgba(var(--center-channel-color-rgb), 0.08)' : '')};
     gap: 16px;
 }
 `;
@@ -403,9 +401,10 @@ const CallSettingsMenuButtonWrapper = styled.button`
 type CallSettingsProps = {
     onLiveCaptionsToggle: () => void;
     showLiveCaptions: boolean;
+    isDM?: boolean;
 }
 
-export function CallSettings({onLiveCaptionsToggle, showLiveCaptions}: CallSettingsProps) {
+export function CallSettings({onLiveCaptionsToggle, showLiveCaptions, isDM = false}: CallSettingsProps) {
     const [showAudioInputs, setShowAudioInputs] = useState(false);
     const [showAudioOutputs, setShowAudioOutputs] = useState(false);
     const [showVideoInputs, setShowVideoInputs] = useState(false);
@@ -464,6 +463,10 @@ export function CallSettings({onLiveCaptionsToggle, showLiveCaptions}: CallSetti
                 />
                 }
 
+                <li className='MenuGroup menu-divider'/>
+                <NoiseSuppressionMenuItem/>
+                <ShortcutsMenuItem isDM={isDM}/>
+
                 { (showCCButton || showAdditionalSetttingsButton) && <li className='MenuGroup menu-divider'/>}
                 { showCCButton &&
                 <>
@@ -505,9 +508,10 @@ const MenuList = styled.ul`
 type CallSettingsButtonProps = {
     onLiveCaptionsToggle: () => void;
     showLiveCaptions: boolean;
+    isDM?: boolean;
 };
 
-export function CallSettingsButton({onLiveCaptionsToggle, showLiveCaptions}: CallSettingsButtonProps) {
+export function CallSettingsButton({onLiveCaptionsToggle, showLiveCaptions, isDM = false}: CallSettingsButtonProps) {
     const [showCallSettings, setShowCallSettings] = useState(false);
     const ref = useRef<HTMLDivElement>(null);
     const {formatMessage} = useIntl();
@@ -550,6 +554,7 @@ export function CallSettingsButton({onLiveCaptionsToggle, showLiveCaptions}: Cal
                 <CallSettings
                     onLiveCaptionsToggle={onCCButtonToggle}
                     showLiveCaptions={showLiveCaptions}
+                    isDM={isDM}
                 />
             )}
             <ControlsButton

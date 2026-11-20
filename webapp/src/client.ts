@@ -21,6 +21,8 @@ import {
     STORAGE_CALLS_DEFAULT_AUDIO_OUTPUT_KEY,
     STORAGE_CALLS_DEFAULT_VIDEO_INPUT_KEY,
 } from 'src/constants';
+import {type AutoOutput, createAutoState} from 'src/auto_quality';
+import {AutoQualityRunner, type AutoUpdateReason} from 'src/auto_quality_runner';
 import {type BgBlurData, getBgBlurData} from 'src/local_storage';
 import Segmenter from 'src/segmenter';
 import {
@@ -28,14 +30,17 @@ import {
     applyQualityToSender,
     buildLiveConstraints,
     type CaptureSize,
+    captureQuality,
     getShareQuality,
     normalizeShareQuality,
-    resolveBitrateMbps,
+    type ScreenSenderExtra,
     type ScreenShareQuality,
     screenEncoding,
     screenSenderSettings,
     setShareQuality,
     type ShareCodec,
+    type ShareFps,
+    type ShareResolution,
 } from 'src/screen_share_quality';
 import {SpeakingMonitor} from 'src/speaking';
 import {getNoiseSuppression} from 'src/voice_input_prefs';
@@ -67,9 +72,14 @@ export const DefaultVideoTrackOptions: MediaTrackConstraints = {
 const rtcMonitorInterval = 10000;
 
 export type ScreenQualityInfo = {
+
+    // What the user chose (may be Auto).
     quality: ScreenShareQuality;
     bitrateMbps: number;
     captured: CaptureSize | null;
+
+    // Only in Auto mode: the level in use right now and why it is limited (if it is).
+    auto: {resolution: ShareResolution; fps: ShareFps; limited: 'cpu' | 'bandwidth' | null} | null;
 };
 
 export default class CallsClient extends EventEmitter {
@@ -81,6 +91,11 @@ export default class CallsClient extends EventEmitter {
 
     // Quality of the current (or last requested) screen share, see screen_share_quality.ts.
     private screenQuality: ScreenShareQuality | null = null;
+
+    // Auto quality: the poller that walks the level ladder (null when the share is manual or there is none)
+    // and the native size of the shared source, which the ladder never exceeds.
+    private autoRunner: AutoQualityRunner | null = null;
+    private autoSource: CaptureSize | null = null;
     public localVideoStream: MediaStream | null = null;
     private remoteScreenTrack: MediaStreamTrack | null = null;
     private remoteVoiceTracks: MediaStreamTrack[];
@@ -973,6 +988,7 @@ export default class CallsClient extends EventEmitter {
     }
 
     public destroy() {
+        this.stopAuto();
         this.removeAllListeners('close');
         this.removeAllListeners('connect');
         this.removeAllListeners('remoteVoiceStream');
@@ -1167,6 +1183,7 @@ export default class CallsClient extends EventEmitter {
         this.rtcMonitor?.stop();
 
         this.closed = true;
+        this.stopAuto();
         this.p2p?.destroy();
         this.p2p = null;
         this.p2pActive = false;
@@ -1322,7 +1339,10 @@ export default class CallsClient extends EventEmitter {
         // The picker's choice (or the last stored one) decides content hint, bitrate and codec.
         const shareQuality = quality ? normalizeShareQuality(quality) : getShareQuality();
         this.screenQuality = shareQuality;
-        this.p2p?.setScreenQuality(shareQuality, this.getScreenCaptureSize());
+        this.autoSource = null;
+        if (!shareQuality.auto) {
+            this.pushQualityToP2P();
+        }
 
         const screenAudioTrack = screenStream.getAudioTracks()[0];
 
@@ -1347,6 +1367,8 @@ export default class CallsClient extends EventEmitter {
             this.localScreenAudioTrack = null;
             this.localScreenStream = null;
             this.screenQuality = null;
+            this.stopAuto();
+            this.autoSource = null;
             this.p2p?.setScreenQuality(null);
             this.syncP2PMedia();
 
@@ -1383,6 +1405,12 @@ export default class CallsClient extends EventEmitter {
         // Game: smoothness over sharpness. Text: sharpness over smoothness.
         applyContentHint(screenTrack, shareQuality.content);
 
+        // Auto: the capture is at the source size now, pick the first level (and lower the capture to it)
+        // before anything is sent.
+        if (shareQuality.auto) {
+            await this.startAuto(shareQuality, false);
+        }
+
         // When the media goes peer to peer the screen is sent through the P2P
         // connection instead and only added to the SFU peer if we fall back.
         this.syncP2PMedia();
@@ -1398,7 +1426,7 @@ export default class CallsClient extends EventEmitter {
 
         this.screenOnSFU = true;
 
-        const quality = this.screenQuality ?? getShareQuality();
+        const {quality, extra} = this.screenQualityForSend();
         const captured = this.getScreenCaptureSize();
 
         // Always send a fallback track (VP8 encoded) for receivers that don't yet support AV1.
@@ -1406,7 +1434,7 @@ export default class CallsClient extends EventEmitter {
         // tracks before video, so build opts per track instead of assuming index 0.
         // Without explicit encodings calls-common caps screen tracks at 1Mbps/10fps.
         await this.peer.addStream(screenStream, screenStream.getTracks().map((t) => (
-            t.kind === 'video' ? {encodings: [screenEncoding(screenSenderSettings(quality, 'vp8', captured))]} : undefined
+            t.kind === 'video' ? {encodings: [screenEncoding(screenSenderSettings(quality, 'vp8', captured, extra))]} : undefined
         )) as Parameters<RTCPeer['addStream']>[1]);
 
         if (this.config.enableAV1 && this.av1Codec) {
@@ -1414,7 +1442,7 @@ export default class CallsClient extends EventEmitter {
 
             await this.peer.addTrack(screenTrack, screenStream, {
                 codec: this.av1Codec,
-                encodings: [screenEncoding(screenSenderSettings(quality, 'av1', captured))],
+                encodings: [screenEncoding(screenSenderSettings(quality, 'av1', captured, extra))],
             });
         }
 
@@ -1426,13 +1454,142 @@ export default class CallsClient extends EventEmitter {
     // keeps its senders in a private map keyed by track id, hence the cast. The
     // first sender carries the VP8 fallback, the second one (if any) AV1 (see sendScreenOverSFU).
     private async applyScreenSenderParams(trackID: string) {
-        const senders = (this.peer as unknown as {senders?: Record<string, RTCRtpSender[]>} | null)?.senders?.[trackID] ?? [];
-        const quality = this.screenQuality ?? getShareQuality();
+        const senders = this.sfuScreenSenders(trackID);
+        const {quality, extra} = this.screenQualityForSend();
         const captured = this.getScreenCaptureSize();
         const codecs: ShareCodec[] = ['vp8', 'av1'];
         for (let i = 0; i < senders.length; i++) {
             // eslint-disable-next-line no-await-in-loop
-            await applyQualityToSender(senders[i], quality, {codec: codecs[i] ?? 'vp8', captured});
+            await applyQualityToSender(senders[i], quality, {codec: codecs[i] ?? 'vp8', captured, extra});
+        }
+    }
+
+    private sfuScreenSenders(trackID: string): RTCRtpSender[] {
+        return (this.peer as unknown as {senders?: Record<string, RTCRtpSender[]>} | null)?.senders?.[trackID] ?? [];
+    }
+
+    // The sender(s) that carry the screen right now (P2P: one, SFU: VP8 and maybe AV1).
+    private getScreenSenders(): RTCRtpSender[] {
+        const track = this.localScreenTrack;
+        if (!track) {
+            return [];
+        }
+        if (this.p2pActive) {
+            return this.p2p?.getScreenSenders() ?? [];
+        }
+        return this.sfuScreenSenders(track.id).filter((s) => s.track);
+    }
+
+    // The quality that is sent right now. Manual: what was chosen. Auto: the level the ladder is at
+    // (as a manual quality, so the rest of the code needs no special case) plus its runtime extras.
+    private screenQualityForSend(): {quality: ScreenShareQuality; extra: ScreenSenderExtra | null} {
+        const chosen = this.screenQuality ?? getShareQuality();
+        if (!chosen.auto) {
+            return {quality: chosen, extra: null};
+        }
+        const output = this.autoRunner?.getOutput();
+        if (!output) {
+            return {quality: captureQuality(chosen), extra: null};
+        }
+        const captured = this.getScreenCaptureSize();
+        const target = output.rung.size;
+
+        // A capture that did not shrink to the level (refused constraints) is scaled down by the encoder.
+        const scaleDown = captured && captured.height > target.height * 1.05 ? captured.height / target.height : 1;
+        return {
+            quality: {...chosen, auto: false, resolution: output.rung.resolution, fps: output.rung.fps, manualBitrateMbps: null},
+            extra: {bitrateCapMbps: output.capMbps, scaleDown},
+        };
+    }
+
+    private pushQualityToP2P() {
+        const {quality, extra} = this.screenQualityForSend();
+        this.p2p?.setScreenQuality(quality, this.getScreenCaptureSize(), extra);
+    }
+
+    private stopAuto() {
+        this.autoRunner?.stop();
+        this.autoRunner = null;
+    }
+
+    // Starts Auto for the share that is going on. `measureSource`: the capture may be at a smaller
+    // size than the source (a manual choice was active), so it is opened up to the source size first.
+    private async startAuto(chosen: ScreenShareQuality, measureSource: boolean) {
+        const track = this.localScreenTrack;
+        if (!track) {
+            return;
+        }
+        this.stopAuto();
+
+        if (measureSource || !this.autoSource) {
+            if (measureSource) {
+                const before = this.getScreenCaptureSize();
+                try {
+                    await track.applyConstraints(buildLiveConstraints(chosen));
+                } catch (err) {
+                    logWarn('failed to open the capture to the source size', err);
+                }
+                await this.waitForCaptureSizeChange(track, before, 1500);
+                if (this.localScreenTrack !== track) {
+                    return;
+                }
+            }
+            this.autoSource = this.getScreenCaptureSize() ?? {width: 1920, height: 1080};
+        }
+
+        const runner: AutoQualityRunner = new AutoQualityRunner({
+            state: createAutoState(chosen.content, this.autoSource!),
+            getSenders: () => this.getScreenSenders(),
+            getCaptured: () => this.getScreenCaptureSize(),
+            onUpdate: (output, reason) => this.applyAutoOutput(runner, output, reason),
+            onInfo: () => this.emitScreenQuality(),
+        });
+        this.autoRunner = runner;
+        await this.applyAutoOutput(runner, runner.getOutput(), 'level');
+        if (this.autoRunner === runner) {
+            runner.start();
+        }
+    }
+
+    // Applies an Auto level (or only a new bitrate cap) to the capture and the senders, live.
+    private async applyAutoOutput(runner: AutoQualityRunner, output: AutoOutput, reason: AutoUpdateReason) {
+        const track = this.localScreenTrack;
+        if (!track || track.readyState !== 'live' || this.autoRunner !== runner) {
+            return;
+        }
+
+        if (reason === 'level') {
+            const {quality} = this.screenQualityForSend();
+            try {
+                await track.applyConstraints(buildLiveConstraints(quality));
+            } catch (err) {
+                // Electron's legacy capture may refuse: the senders below then scale / cap instead.
+                logWarn('failed to apply auto quality constraints', err);
+            }
+            await this.waitForCaptureHeight(track, output.rung.size.height, 1500);
+            if (this.localScreenTrack !== track || this.autoRunner !== runner) {
+                return;
+            }
+        }
+
+        if (this.screenOnSFU) {
+            await this.applyScreenSenderParams(track.id);
+        }
+        this.pushQualityToP2P();
+        runner.setApplied(output, this.getScreenCaptureSize());
+        this.emitScreenQuality();
+    }
+
+    // Waits (bounded) until the capture is about `height` tall.
+    private async waitForCaptureHeight(track: MediaStreamTrack, height: number, timeoutMs: number) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const s = track.getSettings?.();
+            if (!s?.height || Math.abs(s.height - height) <= Math.max(2, height * 0.02)) {
+                return;
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((resolve) => setTimeout(resolve, 100));
         }
     }
 
@@ -1453,10 +1610,13 @@ export default class CallsClient extends EventEmitter {
         }
         const captured = this.getScreenCaptureSize();
         const p2pSettings = this.p2pActive ? this.p2p?.getScreenSendSettings() : null;
+        const {quality, extra} = this.screenQualityForSend();
+        const output = this.screenQuality.auto ? this.autoRunner?.getOutput() : null;
         return {
             quality: this.screenQuality,
-            bitrateMbps: p2pSettings?.bitrateMbps ?? resolveBitrateMbps(this.screenQuality, 'vp8', captured),
+            bitrateMbps: p2pSettings?.bitrateMbps ?? screenSenderSettings(quality, 'vp8', captured, extra).bitrateMbps,
             captured,
+            auto: output ? {resolution: output.rung.resolution, fps: output.rung.fps, limited: output.limited} : null,
         };
     }
 
@@ -1482,6 +1642,13 @@ export default class CallsClient extends EventEmitter {
         this.screenQuality = next;
         applyContentHint(track, next.content);
 
+        if (next.auto) {
+            // (Re)start the ladder. Coming from a manual choice the capture is first opened up to the source size.
+            await this.startAuto(next, !prev?.auto);
+            return;
+        }
+        this.stopAuto();
+
         const before = this.getScreenCaptureSize();
         try {
             await track.applyConstraints(buildLiveConstraints(next));
@@ -1496,7 +1663,7 @@ export default class CallsClient extends EventEmitter {
 
         // The capture size follows the constraints a moment later: wait for it (bounded)
         // so the bitrate matches the real size.
-        if (!prev || prev.resolution !== next.resolution) {
+        if (!prev || prev.auto || prev.resolution !== next.resolution) {
             await this.waitForCaptureSizeChange(track, before, 1500);
             if (this.localScreenTrack !== track) {
                 return;

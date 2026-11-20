@@ -17,6 +17,12 @@ export type ShareContent = 'game' | 'text';
 export type ShareCodec = 'vp8' | 'av1' | 'h264';
 
 export type ScreenShareQuality = {
+
+    // Automatic mode (the default): resolution, frame rate and bitrate are picked from the source
+    // size and the content type and then adapted to the connection and the computer while sharing
+    // (see auto_quality.ts). `resolution`, `fps` and `manualBitrateMbps` are the manual values and
+    // are ignored while `auto` is on, they are kept so switching back to manual restores them.
+    auto: boolean;
     resolution: ShareResolution;
     fps: ShareFps;
     content: ShareContent;
@@ -34,6 +40,7 @@ export const MANUAL_BITRATE_MAX_MBPS = 50;
 export const MANUAL_BITRATE_STEP_MBPS = 0.5;
 
 export const defaultShareQuality: ScreenShareQuality = {
+    auto: true,
     resolution: '1080p',
     fps: 60,
     content: 'game',
@@ -79,13 +86,22 @@ function isOneOf<T>(list: readonly T[], value: unknown): value is T {
 }
 
 // Returns a sanitized copy of whatever was stored (or passed), falling back to the defaults field by field.
+// Migration: a stored choice from before "Auto" existed has no `auto` field and stays manual. Only a
+// missing / empty value (new user) gets the default, which is Auto.
 export function normalizeShareQuality(value: unknown): ScreenShareQuality {
     const v = (value && typeof value === 'object' ? value : {}) as Partial<Record<keyof ScreenShareQuality, unknown>>;
+    let auto = defaultShareQuality.auto;
+    if (typeof v.auto === 'boolean') {
+        auto = v.auto;
+    } else if (Object.keys(v).length > 0) {
+        auto = false;
+    }
     let manual: number | null = null;
     if (typeof v.manualBitrateMbps === 'number' && Number.isFinite(v.manualBitrateMbps)) {
         manual = Math.min(MANUAL_BITRATE_MAX_MBPS, Math.max(MANUAL_BITRATE_MIN_MBPS, v.manualBitrateMbps));
     }
     return {
+        auto,
         resolution: isOneOf(shareResolutions, v.resolution) ? v.resolution : defaultShareQuality.resolution,
         fps: isOneOf(shareFpsOptions, v.fps) ? v.fps : defaultShareQuality.fps,
         content: isOneOf(shareContents, v.content) ? v.content : defaultShareQuality.content,
@@ -117,17 +133,33 @@ export function setShareQuality(quality: ScreenShareQuality) {
 }
 
 export function sameShareQuality(a: ScreenShareQuality, b: ScreenShareQuality): boolean {
-    return a.resolution === b.resolution && a.fps === b.fps && a.content === b.content && a.manualBitrateMbps === b.manualBitrateMbps;
+    return a.auto === b.auto && a.resolution === b.resolution && a.fps === b.fps && a.content === b.content && a.manualBitrateMbps === b.manualBitrateMbps;
 }
 
 // ---------------------------------------------------------------------------
 // Capture constraints
 // ---------------------------------------------------------------------------
 
+// Frame rate Auto captures at before it knows better: the top of the content's ladder.
+export function autoCaptureFps(content: ShareContent): ShareFps {
+    return content === 'game' ? 60 : 30;
+}
+
+// Auto captures at the source size (it can only know that size once the capture exists) and
+// at the top frame rate of its ladder, then lowers both live. Everything that turns a
+// quality into capture constraints goes through this, manual qualities pass unchanged.
+export function captureQuality(q: ScreenShareQuality): ScreenShareQuality {
+    if (!q.auto) {
+        return q;
+    }
+    return {...q, auto: false, resolution: 'source', fps: autoCaptureFps(q.content), manualBitrateMbps: null};
+}
+
 // Constraints for getDisplayMedia. Only upper bounds (`max`) and `ideal` values
 // are used, never `min`, and an ideal above what the source can deliver does not
 // upscale: the browser captures at the source size. `source` sets no size.
-export function buildDisplayMediaConstraints(q: ScreenShareQuality): MediaTrackConstraints {
+export function buildDisplayMediaConstraints(quality: ScreenShareQuality): MediaTrackConstraints {
+    const q = captureQuality(quality);
     const constraints: MediaTrackConstraints = {
         frameRate: {ideal: q.fps, max: q.fps},
     };
@@ -143,7 +175,8 @@ export function buildDisplayMediaConstraints(q: ScreenShareQuality): MediaTrackC
 // getDisplayMedia case, `source` has to name its (very large) ideal size
 // explicitly: constraints from the previous quality are replaced, and omitting the
 // size would let the browser fall back to its default size instead of the native one.
-export function buildLiveConstraints(q: ScreenShareQuality): MediaTrackConstraints {
+export function buildLiveConstraints(quality: ScreenShareQuality): MediaTrackConstraints {
+    const q = captureQuality(quality);
     if (isSized(q.resolution)) {
         return buildDisplayMediaConstraints(q);
     }
@@ -158,7 +191,8 @@ export function buildLiveConstraints(q: ScreenShareQuality): MediaTrackConstrain
 // `source` the size is not left out but set to a very large maximum: a maximum is
 // only an upper bound (it never upscales), and it avoids relying on the default
 // capture size of Electron's desktop capturer.
-export function buildElectronMandatory(q: ScreenShareQuality, sourceID?: string): Record<string, unknown> {
+export function buildElectronMandatory(quality: ScreenShareQuality, sourceID?: string): Record<string, unknown> {
+    const q = captureQuality(quality);
     const mandatory: Record<string, unknown> = {
         chromeMediaSource: 'desktop',
         maxFrameRate: q.fps,
@@ -184,7 +218,8 @@ export type CaptureSize = {width: number; height: number};
 
 // The size we expect to capture: the source size, shrunk (keeping the aspect
 // ratio) to fit the preset, never enlarged.
-export function effectiveCaptureSize(q: ScreenShareQuality, source: CaptureSize): CaptureSize {
+export function effectiveCaptureSize(quality: ScreenShareQuality, source: CaptureSize): CaptureSize {
+    const q = captureQuality(quality);
     if (!isSized(q.resolution) || source.width <= 0 || source.height <= 0) {
         return {...source};
     }
@@ -247,7 +282,8 @@ export function autoBitrateMbps(pixels: number, fps: ShareFps, codec: ShareCodec
 
 // The pixel count the bitrate is chosen for: the real capture size when known (it
 // already includes "never upscale"), otherwise what the preset asks for.
-export function bitratePixels(q: ScreenShareQuality, captured?: Partial<CaptureSize> | null): number {
+export function bitratePixels(quality: ScreenShareQuality, captured?: Partial<CaptureSize> | null): number {
+    const q = captureQuality(quality);
     if (captured?.width && captured?.height) {
         return captured.width * captured.height;
     }
@@ -256,7 +292,8 @@ export function bitratePixels(q: ScreenShareQuality, captured?: Partial<CaptureS
 }
 
 // Bitrate in Mbps used for the encoder: the manual value, or the automatic one.
-export function resolveBitrateMbps(q: ScreenShareQuality, codec: ShareCodec, captured?: Partial<CaptureSize> | null): number {
+export function resolveBitrateMbps(quality: ScreenShareQuality, codec: ShareCodec, captured?: Partial<CaptureSize> | null): number {
+    const q = captureQuality(quality);
     if (q.manualBitrateMbps !== null) {
         return q.manualBitrateMbps;
     }
@@ -271,8 +308,9 @@ export type ScreenSenderSettings = {
     maxBitrate: number;
     maxFramerate: number;
 
-    // Always 1: never scale the capture down in the encoder, the capture constraints already did the sizing.
-    scaleResolutionDownBy: 1;
+    // 1 unless Auto has to shrink a capture that refused to shrink (see ScreenSenderExtra.scaleDown):
+    // normally the capture constraints already did the sizing and the encoder never scales.
+    scaleResolutionDownBy: number;
     degradationPreference: RTCDegradationPreference;
     bitrateMbps: number;
 };
@@ -281,12 +319,34 @@ export function degradationPreferenceFor(content: ShareContent): RTCDegradationP
     return content === 'text' ? 'maintain-resolution' : 'maintain-framerate';
 }
 
-export function screenSenderSettings(q: ScreenShareQuality, codec: ShareCodec, captured?: Partial<CaptureSize> | null): ScreenSenderSettings {
-    const bitrateMbps = resolveBitrateMbps(q, codec, captured);
+// Runtime extras of Auto quality (the quality itself only holds what the user chose).
+export type ScreenSenderExtra = {
+
+    // Upper bound for the bitrate in Mbps (a fraction of the available outgoing bitrate), null/absent = none.
+    bitrateCapMbps?: number | null;
+
+    // Encoder side downscale factor for a capture that is larger than the level asks for
+    // (a capture track that refused new constraints). 1/absent = none.
+    scaleDown?: number;
+};
+
+export function screenSenderSettings(
+    quality: ScreenShareQuality,
+    codec: ShareCodec,
+    captured?: Partial<CaptureSize> | null,
+    extra?: ScreenSenderExtra | null,
+): ScreenSenderSettings {
+    const q = captureQuality(quality);
+    const scale = Math.max(1, extra?.scaleDown ?? 1);
+    const scaledCapture = captured?.width && captured?.height && scale > 1 ? {width: Math.round(captured.width / scale), height: Math.round(captured.height / scale)} : captured;
+    let bitrateMbps = resolveBitrateMbps(q, codec, scaledCapture);
+    if (extra?.bitrateCapMbps && q.manualBitrateMbps === null) {
+        bitrateMbps = roundMbps(Math.max(MIN_AUTO_MBPS, Math.min(bitrateMbps, extra.bitrateCapMbps)));
+    }
     return {
         maxBitrate: Math.round(bitrateMbps * 1_000_000),
         maxFramerate: q.fps,
-        scaleResolutionDownBy: 1,
+        scaleResolutionDownBy: scale,
         degradationPreference: degradationPreferenceFor(q.content),
         bitrateMbps,
     };
@@ -385,6 +445,7 @@ export async function applyQualityToSender(
     opts: {
         codec: ShareCodec;
         captured?: Partial<CaptureSize> | null;
+        extra?: ScreenSenderExtra | null;
         chooseCodec?: (negotiated: RTCRtpCodecParameters[]) => RTCRtpCodecParameters | null;
     },
 ): Promise<ScreenSenderSettings | null> {
@@ -411,7 +472,7 @@ export async function applyQualityToSender(
             }
         }
 
-        const settings = screenSenderSettings(q, codec, opts.captured);
+        const settings = screenSenderSettings(q, codec, opts.captured, opts.extra);
         Object.assign(encoding, screenEncoding(settings));
         params.degradationPreference = settings.degradationPreference;
         await sender.setParameters(params);
@@ -449,4 +510,17 @@ export function formatQualityLabel(q: ScreenShareQuality, bitrateMbps: number, c
     }
     const mbps = Number.isInteger(bitrateMbps) ? String(bitrateMbps) : bitrateMbps.toFixed(1);
     return `${res}${q.fps} · ${mbps} Mbps`;
+}
+
+// Label of the level Auto is at, e.g. "1080p60 · 7.5 Mbps". The picture is never larger than the source,
+// so the real capture size is preferred over what the level asks for (1080p source on a 4K level = 1080p).
+export function formatAutoLabel(level: {resolution: ShareResolution; fps: ShareFps}, bitrateMbps: number, captured?: Partial<CaptureSize> | null): string {
+    let res: string;
+    if (captured?.height) {
+        res = captured.height >= 2100 ? '4K' : `${captured.height}p`;
+    } else {
+        res = level.resolution === '4k' ? '4K' : level.resolution;
+    }
+    const mbps = Number.isInteger(bitrateMbps) ? String(bitrateMbps) : bitrateMbps.toFixed(1);
+    return `${res}${level.fps} · ${mbps} Mbps`;
 }

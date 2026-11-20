@@ -27,7 +27,7 @@ import {
 
 jest.mock('./log');
 
-const q = (over: Partial<ScreenShareQuality> = {}): ScreenShareQuality => ({...defaultShareQuality, ...over});
+const q = (over: Partial<ScreenShareQuality> = {}): ScreenShareQuality => ({...defaultShareQuality, auto: false, ...over});
 
 const px = (height: '720p' | '1080p' | '1440p' | '4k') => {
     const h = {'720p': 720, '1080p': 1080, '1440p': 1440, '4k': 2160}[height];
@@ -384,13 +384,29 @@ describe('persistence', () => {
         jest.restoreAllMocks();
     });
 
-    it('returns the defaults when nothing is stored', () => {
+    it('returns the defaults when nothing is stored, and Auto is the default', () => {
         expect(getShareQuality()).toEqual(defaultShareQuality);
+        expect(getShareQuality().auto).toBe(true);
+    });
+
+    it('keeps an existing manual choice from before Auto existed as it is', () => {
+        window.localStorage.setItem(STORAGE_CALLS_SHARE_QUALITY_KEY, JSON.stringify({resolution: '1440p', fps: 30, content: 'text', manualBitrateMbps: 12}));
+        expect(getShareQuality()).toEqual({auto: false, resolution: '1440p', fps: 30, content: 'text', manualBitrateMbps: 12});
+    });
+
+    it('stores and restores an Auto choice, with the manual values kept for later', () => {
+        setShareQuality({auto: true, resolution: '720p', fps: 15, content: 'text', manualBitrateMbps: null});
+        expect(getShareQuality()).toEqual({auto: true, resolution: '720p', fps: 15, content: 'text', manualBitrateMbps: null});
+    });
+
+    it('treats an empty stored object like a new user', () => {
+        window.localStorage.setItem(STORAGE_CALLS_SHARE_QUALITY_KEY, '{}');
+        expect(getShareQuality().auto).toBe(true);
     });
 
     it('remembers the last choice', () => {
-        setShareQuality({resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: 20});
-        expect(getShareQuality()).toEqual({resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: 20});
+        setShareQuality({auto: false, resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: 20});
+        expect(getShareQuality()).toEqual({auto: false, resolution: '4k', fps: 30, content: 'text', manualBitrateMbps: 20});
     });
 
     it('survives garbage and partially valid values field by field', () => {
@@ -398,7 +414,9 @@ describe('persistence', () => {
         expect(getShareQuality()).toEqual(defaultShareQuality);
 
         window.localStorage.setItem(STORAGE_CALLS_SHARE_QUALITY_KEY, JSON.stringify({resolution: '8k', fps: 45, content: 'text', manualBitrateMbps: 'x'}));
-        expect(getShareQuality()).toEqual({...defaultShareQuality, content: 'text'});
+
+        // A stored choice without the Auto field is from before Auto existed: it stays manual.
+        expect(getShareQuality()).toEqual({...defaultShareQuality, auto: false, content: 'text'});
     });
 
     it('clamps the manual bitrate', () => {

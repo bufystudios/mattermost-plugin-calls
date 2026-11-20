@@ -95,6 +95,7 @@ import {IncomingCallContainer} from 'src/components/incoming_calls/call_containe
 import JoinCallWatcher from 'src/components/join_call_watcher';
 import RecordingsFilePreview from 'src/components/recordings_file_preview';
 import {makeSameChannelLinkClickHandler} from 'src/components/same_channel_link_click_handler';
+import ScreenSharingBanner from 'src/components/screen_sharing_banner';
 import AudioDevicesSettingsSection from 'src/components/user_settings/audio_devices_settings_section';
 import ScreenShareQualitySettingsSection from 'src/components/user_settings/screen_share_quality_settings_section';
 import ScreenSharingSettingsSection from 'src/components/user_settings/screen_sharing_settings_section';
@@ -371,6 +372,7 @@ export default class Plugin {
         registry.registerNeedsTeamRoute('/expanded', injectIntl(ExpandedView));
         registry.registerGlobalComponent(injectIntl(SwitchCallModal));
         registry.registerGlobalComponent(injectIntl(ScreenSourceModal));
+        registry.registerGlobalComponent(ScreenSharingBanner);
         registry.registerGlobalComponent(injectIntl(IncomingCallContainer));
 
         registry.registerUserSettings({

@@ -56,7 +56,7 @@ describe('ScreenSourceModal quality picker', () => {
     });
 
     it('offers the picker with the last choice pre-selected', async () => {
-        setShareQuality({resolution: '4k', fps: 60, content: 'game', manualBitrateMbps: null});
+        setShareQuality({auto: false, resolution: '4k', fps: 60, content: 'game', manualBitrateMbps: null});
         await renderModal();
 
         expect((screen.getByTestId('share-quality-source-resolution') as HTMLSelectElement).value).toBe('4k');
@@ -66,13 +66,14 @@ describe('ScreenSourceModal quality picker', () => {
     it('stores the choice before telling the desktop app to share, so the widget window uses it', async () => {
         await renderModal();
 
+        fireEvent.change(screen.getByTestId('share-quality-source-mode'), {target: {value: 'manual'}});
         fireEvent.change(screen.getByTestId('share-quality-source-resolution'), {target: {value: 'source'}});
         fireEvent.change(screen.getByTestId('share-quality-source-fps'), {target: {value: '30'}});
         fireEvent.change(screen.getByTestId('share-quality-source-content'), {target: {value: 'text'}});
 
         shareScreen.mockImplementation(() => {
             // The widget window reads the stored value when the share starts.
-            expect(getShareQuality()).toEqual({resolution: 'source', fps: 30, content: 'text', manualBitrateMbps: null});
+            expect(getShareQuality()).toEqual({auto: false, resolution: 'source', fps: 30, content: 'text', manualBitrateMbps: null});
         });
         fireEvent.click(screen.getByText('Share'));
 
@@ -83,6 +84,7 @@ describe('ScreenSourceModal quality picker', () => {
 
     it('does not store anything when cancelled', async () => {
         await renderModal();
+        fireEvent.change(screen.getByTestId('share-quality-source-mode'), {target: {value: 'manual'}});
         fireEvent.change(screen.getByTestId('share-quality-source-resolution'), {target: {value: '720p'}});
         fireEvent.click(screen.getByText('Cancel'));
 

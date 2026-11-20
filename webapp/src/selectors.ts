@@ -383,6 +383,26 @@ export const screenSharingSessionForCurrentCall: (state: GlobalState) => UserSes
         (ids, channelID, sessions) => sessions[channelID]?.[ids[channelID]],
     );
 
+// The call the current user is sharing their screen in, or null. Works in every window: the call client
+// (web, widget window, pop out) knows its own session, and in the desktop app main window, where the call lives
+// in the widget window, the session comes from clientStateReducer (DESKTOP_WIDGET_CONNECTED). The sharing
+// session id itself comes from the websocket events every window receives.
+export const ownScreenSharing: (state: GlobalState) => {channelID: string; sessionID: string} | null =
+    createSelector(
+        'ownScreenSharing',
+        screenSharingIDsForCalls,
+        channelIDForCurrentCall,
+        clientState,
+        getCallsClientSessionID,
+        (ids, channelID, client, clientSessionID) => {
+            const mySessionID = clientSessionID || client?.sessionID || '';
+            if (!channelID || !mySessionID || ids[channelID] !== mySessionID) {
+                return null;
+            }
+            return {channelID, sessionID: mySessionID};
+        },
+    );
+
 export const sortedSessionsInCurrentCall: (state: GlobalState) => UserSessionState[] =
     createSelector(
         'sortedSessionsInCurrentCall',

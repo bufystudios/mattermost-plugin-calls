@@ -23,6 +23,9 @@ export default function VoiceInputSettingsSection() {
     const [pttCode, setPTTCode] = useState(getPushToTalkConfig().code);
     const [capturing, setCapturing] = useState(false);
 
+    // "Test": lights up while the chosen push-to-talk key is held down.
+    const [keyHeld, setKeyHeld] = useState(false);
+
     const title = formatMessage({defaultMessage: 'Voice input'});
     const editLabel = formatMessage({defaultMessage: 'Edit'});
 
@@ -54,13 +57,49 @@ export default function VoiceInputSettingsSection() {
         return () => window.removeEventListener('keydown', onKeyDown, true);
     }, [capturing]);
 
+    // Key test: only while the section is open, push to talk is chosen and a key is not being captured.
+    useEffect(() => {
+        if (!active || !pttEnabled || !pttCode || capturing) {
+            setKeyHeld(false);
+            // eslint-disable-next-line no-undefined
+            return undefined;
+        }
+        const down = (ev: KeyboardEvent) => {
+            if (ev.code === pttCode) {
+                setKeyHeld(true);
+            }
+        };
+        const up = (ev: KeyboardEvent) => {
+            if (ev.code === pttCode) {
+                setKeyHeld(false);
+            }
+        };
+        const release = () => setKeyHeld(false);
+        window.addEventListener('keydown', down, true);
+        window.addEventListener('keyup', up, true);
+        window.addEventListener('blur', release);
+        return () => {
+            window.removeEventListener('keydown', down, true);
+            window.removeEventListener('keyup', up, true);
+            window.removeEventListener('blur', release);
+        };
+    }, [active, pttEnabled, pttCode, capturing]);
+
     const savedPTT = getPushToTalkConfig();
-    const summary = formatMessage({defaultMessage: 'Noise suppression: {ns}. Input mode: {mode}.'}, {
-        ns: getNoiseSuppression() ? formatMessage({defaultMessage: 'on'}) : formatMessage({defaultMessage: 'off'}),
-        mode: savedPTT.enabled ? formatMessage({defaultMessage: 'push to talk ({key})'}, {key: keyCodeLabel(savedPTT.code)}) : formatMessage({defaultMessage: 'voice activity'}),
+    const noiseOn = getNoiseSuppression();
+    const noiseSummary = formatMessage({defaultMessage: 'Noise suppression: {state}'}, {
+        state: noiseOn ? formatMessage({defaultMessage: 'On'}) : formatMessage({defaultMessage: 'Off'}),
+    });
+    const inputSummary = formatMessage({defaultMessage: 'Input mode: {mode}'}, {
+        mode: savedPTT.enabled ? formatMessage({defaultMessage: 'push to talk (hold {key})'}, {key: keyCodeLabel(savedPTT.code)}) : formatMessage({defaultMessage: 'voice activity'}),
     });
 
     const needsKey = pttEnabled && !pttCode;
+
+    let keyButtonLabel = pttCode ? formatMessage({defaultMessage: 'Change'}) : formatMessage({defaultMessage: 'Set key'});
+    if (capturing) {
+        keyButtonLabel = formatMessage({defaultMessage: 'Cancel'});
+    }
 
     const handleSave = () => {
         if (needsKey) {
@@ -95,7 +134,10 @@ export default function VoiceInputSettingsSection() {
                     </button>
                 </div>
                 <div className='section-min__describe'>
-                    <span>{summary}</span>
+                    <div data-testid='voice-input-summary-noise'>
+                        <strong>{noiseSummary}</strong>
+                    </div>
+                    <div data-testid='voice-input-summary-mode'>{inputSummary}</div>
                 </div>
             </div>
         );
@@ -148,17 +190,41 @@ export default function VoiceInputSettingsSection() {
                             </label>
 
                             {pttEnabled &&
-                                <KeyRow>
-                                    <span>{formatMessage({defaultMessage: 'Push-to-talk key'})}</span>
-                                    <KeyButton
-                                        type='button'
-                                        className='btn btn-tertiary'
-                                        data-testid='ptt-key-button'
-                                        onClick={() => setCapturing(!capturing)}
-                                    >
-                                        {capturing ? formatMessage({defaultMessage: 'Press a key… (Esc to cancel)'}) : (keyCodeLabel(pttCode) || formatMessage({defaultMessage: 'Click to set a key'}))}
-                                    </KeyButton>
-                                </KeyRow>
+                                <>
+                                    <KeyRow>
+                                        <span>{formatMessage({defaultMessage: 'Push-to-talk key:'})}</span>
+                                        <KeyChip
+                                            data-testid='ptt-key-chip'
+                                            $capturing={capturing}
+                                        >
+                                            {capturing ? formatMessage({defaultMessage: 'Press a key…'}) : (keyCodeLabel(pttCode) || formatMessage({defaultMessage: 'Not set'}))}
+                                        </KeyChip>
+                                        <button
+                                            type='button'
+                                            className='btn btn-tertiary btn-sm'
+                                            data-testid='ptt-key-button'
+                                            onClick={() => setCapturing(!capturing)}
+                                        >
+                                            {keyButtonLabel}
+                                        </button>
+                                    </KeyRow>
+                                    {capturing &&
+                                        <Description data-testid='ptt-capture-hint'>
+                                            {formatMessage({defaultMessage: 'Press the key you want to hold to talk. Esc cancels.'})}
+                                        </Description>
+                                    }
+                                    {!capturing && Boolean(pttCode) &&
+                                        <KeyRow>
+                                            <span>{formatMessage({defaultMessage: 'Test: hold the key'})}</span>
+                                            <TestLight
+                                                data-testid='ptt-test-indicator'
+                                                $on={keyHeld}
+                                            >
+                                                {keyHeld ? formatMessage({defaultMessage: 'Key pressed: your mic would be open'}) : formatMessage({defaultMessage: 'Not pressed'})}
+                                            </TestLight>
+                                        </KeyRow>
+                                    }
+                                </>
                             }
                             {needsKey &&
                                 <Description data-testid='ptt-key-required'>
@@ -196,11 +262,26 @@ export default function VoiceInputSettingsSection() {
 const KeyRow = styled.div`
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 12px;
     padding-left: 24px;
+    margin-top: 4px;
 `;
 
-const KeyButton = styled.button`
-    min-width: 160px;
+const KeyChip = styled.span<{$capturing: boolean}>`
+    min-width: 96px;
+    padding: 2px 10px;
+    border-radius: 4px;
+    border: 2px solid ${({$capturing}) => ($capturing ? 'var(--button-bg)' : 'rgba(var(--center-channel-color-rgb), 0.24)')};
+    background: ${({$capturing}) => ($capturing ? 'rgba(var(--button-bg-rgb), 0.08)' : 'rgba(var(--center-channel-color-rgb), 0.04)')};
+    text-align: center;
+    font-weight: 600;
+`;
+
+const TestLight = styled.span<{$on: boolean}>`
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 600;
+    background: ${({$on}) => ($on ? 'rgba(61, 184, 135, 0.16)' : 'rgba(var(--center-channel-color-rgb), 0.08)')};
+    color: ${({$on}) => ($on ? '#2a8a64' : 'rgba(var(--center-channel-color-rgb), 0.64)')};
 `;

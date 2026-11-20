@@ -4,7 +4,7 @@
 import {fireEvent, render, screen} from '@testing-library/react';
 import React from 'react';
 import {createIntl, RawIntlProvider} from 'react-intl';
-import {getNoiseSuppression, getPushToTalkConfig} from 'src/voice_input_prefs';
+import {getNoiseLevel, getPushToTalkConfig} from 'src/voice_input_prefs';
 
 import VoiceInputSettingsSection from './voice_input_settings_section';
 
@@ -37,14 +37,15 @@ describe('VoiceInputSettingsSection', () => {
         window.localStorage.clear();
     });
 
-    it('defaults to noise suppression on and push-to-talk off', () => {
+    it('defaults to Enhanced noise suppression and push-to-talk off', () => {
         renderSection();
 
-        expect(screen.getByTestId('voice-input-summary-noise')).toHaveTextContent('Noise suppression: On');
+        expect(screen.getByTestId('voice-input-summary-noise')).toHaveTextContent('Noise suppression: Enhanced');
         expect(screen.getByTestId('voice-input-summary-mode')).toHaveTextContent('Input mode: voice activity');
         open();
 
-        expect(screen.getByTestId('noise-suppression-checkbox')).toBeChecked();
+        expect(screen.getByTestId('noise-level-radio-enhanced')).toBeChecked();
+        expect(screen.getByText('Maximum (experimental)')).toBeInTheDocument();
         expect(screen.getByTestId('input-mode-voice-activity')).toBeChecked();
         expect(screen.queryByTestId('ptt-key-button')).not.toBeInTheDocument();
     });
@@ -56,15 +57,22 @@ describe('VoiceInputSettingsSection', () => {
         expect(screen.getByText(/only works while a Mattermost window .* has focus/)).toBeInTheDocument();
     });
 
-    it('turns noise suppression off and applies it to the live call right away', () => {
+    it('picks a noise level and applies it to the live call right away', () => {
         renderSection();
         open();
 
-        fireEvent.click(screen.getByTestId('noise-suppression-checkbox'));
+        fireEvent.click(screen.getByTestId('noise-level-radio-maximum'));
         fireEvent.click(screen.getByText('Save'));
 
-        expect(getNoiseSuppression()).toBe(false);
+        expect(getNoiseLevel()).toBe('maximum');
         expect(client.applyNoiseSuppression).toHaveBeenCalled();
+    });
+
+    it('does not show the desktop app options in a browser', () => {
+        renderSection();
+        open();
+
+        expect(screen.queryByTestId('desktop-settings')).not.toBeInTheDocument();
     });
 
     it('captures the next key as the push-to-talk key and saves it', () => {
@@ -131,10 +139,10 @@ describe('VoiceInputSettingsSection', () => {
         expect(getPushToTalkConfig()).toEqual({enabled: false, code: 'KeyV'});
     });
 
-    it('shows the current noise suppression state in the collapsed summary, also after it was turned off', () => {
+    it('shows the current noise level in the collapsed summary, also after it was turned off', () => {
         renderSection();
         open();
-        fireEvent.click(screen.getByTestId('noise-suppression-checkbox'));
+        fireEvent.click(screen.getByTestId('noise-level-radio-off'));
         fireEvent.click(screen.getByText('Save'));
 
         expect(screen.getByTestId('voice-input-summary-noise')).toHaveTextContent('Noise suppression: Off');

@@ -3,29 +3,25 @@
 
 import React, {useEffect, useState} from 'react';
 import {useIntl} from 'react-intl';
-import {notifyVoiceInputPrefsChanged} from 'src/push_to_talk';
 import {getCallShortcuts, shortcutKeyNames} from 'src/shortcut_list';
 import {isMac, JOIN_CALL, LEAVE_CALL, MAKE_REACTION, MUTE_UNMUTE, PARTICIPANTS_LIST_TOGGLE, RAISE_LOWER_HAND, RECORDING_TOGGLE, SHARE_UNSHARE_SCREEN} from 'src/shortcuts';
-import {getCallsClient} from 'src/utils';
 import {
-    getNoiseSuppression,
     getPushToTalkConfig,
     keyCodeLabel,
     onVoiceInputPrefsChanged,
     type PushToTalkConfig,
-    setNoiseSuppression,
 } from 'src/voice_input_prefs';
 import styled from 'styled-components';
 
 // Re-renders when a voice input pref changes in this or another window, so the menu, the PTT hint and the
 // shortcut list always show what is really set (the settings dialog lives in another window on desktop).
-export function useVoiceInputPrefs(): {noiseSuppression: boolean; ptt: PushToTalkConfig} {
+export function useVoiceInputPrefs(): {ptt: PushToTalkConfig} {
     const [, setVersion] = useState(0);
     useEffect(() => {
         const refresh = () => setVersion((v) => v + 1);
         return onVoiceInputPrefsChanged(refresh);
     }, []);
-    return {noiseSuppression: getNoiseSuppression(), ptt: getPushToTalkConfig()};
+    return {ptt: getPushToTalkConfig()};
 }
 
 // "PTT: Ctrl" on the call widget / pop out while push to talk is on, so people know why the mute
@@ -45,51 +41,6 @@ export function PushToTalkHint({onDark = false}: {onDark?: boolean}) {
         >
             {formatMessage({defaultMessage: 'PTT: {key}'}, {key})}
         </Hint>
-    );
-}
-
-// Menu item with a switch: "Noise suppression  [On]". Applies to the live microphone right away.
-export function NoiseSuppressionMenuItem() {
-    const {formatMessage} = useIntl();
-    const {noiseSuppression} = useVoiceInputPrefs();
-
-    const toggle = () => {
-        setNoiseSuppression(!noiseSuppression);
-
-        // Applies it to the live mic in the window that owns the call (the pop out's opener) and tells the other windows.
-        notifyVoiceInputPrefsChanged();
-        getCallsClient()?.applyNoiseSuppression();
-    };
-
-    const label = formatMessage({defaultMessage: 'Noise suppression'});
-    const state = noiseSuppression ? formatMessage({defaultMessage: 'On'}) : formatMessage({defaultMessage: 'Off'});
-    const ariaLabel = formatMessage({defaultMessage: 'Noise suppression: {state}'}, {state});
-
-    return (
-        <li
-            className='MenuItem'
-            role='menuitemcheckbox'
-            aria-checked={noiseSuppression}
-            aria-label={ariaLabel}
-        >
-            <ItemButton
-                id='calls-menu-noise-suppression'
-                data-testid='noise-suppression-toggle'
-                className='style--none'
-                onClick={toggle}
-            >
-                <ItemText>
-                    <span>{label}</span>
-                    <Sub data-testid='noise-suppression-state'>{state}</Sub>
-                </ItemText>
-                <Switch
-                    $on={noiseSuppression}
-                    aria-hidden={true}
-                >
-                    <Knob $on={noiseSuppression}/>
-                </Switch>
-            </ItemButton>
-        </li>
     );
 }
 
@@ -221,33 +172,6 @@ const ItemButton = styled.button`
 const ItemText = styled.span`
     display: flex;
     flex-direction: column;
-`;
-
-const Sub = styled.span`
-    font-size: 12px;
-    line-height: 16px;
-    color: rgba(var(--center-channel-color-rgb), 0.64);
-`;
-
-const Switch = styled.span<{$on: boolean}>`
-    position: relative;
-    flex-shrink: 0;
-    width: 32px;
-    height: 18px;
-    border-radius: 9px;
-    background: ${({$on}) => ($on ? 'var(--online-indicator, #3db887)' : 'rgba(var(--center-channel-color-rgb), 0.24)')};
-    transition: background 0.15s;
-`;
-
-const Knob = styled.span<{$on: boolean}>`
-    position: absolute;
-    top: 2px;
-    left: ${({$on}) => ($on ? '16px' : '2px')};
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: white;
-    transition: left 0.15s;
 `;
 
 const Chevron = styled.span<{$open: boolean}>`

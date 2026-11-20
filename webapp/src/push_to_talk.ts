@@ -4,7 +4,9 @@
 // Configurable push-to-talk (PTT).
 //
 // A plugin cannot register a global hotkey, so this only works while a
-// Mattermost window has keyboard focus. The key handling is hoisted out of the
+// Mattermost window has keyboard focus. (The Bufy desktop app is the exception: desktop_bufy.ts registers the
+// key globally through window.desktopAPI.bufy, and while that registration exists this in-window handler
+// stays out of the way, so one key press never opens the mic twice.) The key handling is hoisted out of the
 // individual components so the main window, the call widget and the pop out
 // all behave the same:
 //
@@ -15,7 +17,8 @@
 //   lives in the widget window) forwards press/release through a
 //   BroadcastChannel to the window that owns it.
 
-import {getPushToTalkConfig, isModifierCode, type PushToTalkConfig} from 'src/voice_input_prefs';
+import {isGlobalPttActive} from 'src/desktop_bufy';
+import {getPushToTalkConfig, isModifierCode, isMouseCode, type PushToTalkConfig} from 'src/voice_input_prefs';
 
 const nonTextInputTypes = new Set([
     'button', 'checkbox', 'radio', 'range', 'color', 'file', 'image', 'reset', 'submit',
@@ -180,7 +183,7 @@ export function initPushToTalk(win: Window = window, options: InitOptions = {}):
 
     const handler = new PushToTalkHandler({
         getConfig: getPushToTalkConfig,
-        canHandle: () => Boolean(getClient()) || Boolean(options.isInCall?.()),
+        canHandle: () => !isGlobalPttActive() && (Boolean(getClient()) || Boolean(options.isInCall?.())),
         press: () => {
             const client = getClient();
             if (client) {
@@ -207,12 +210,15 @@ export function initPushToTalk(win: Window = window, options: InitOptions = {}):
         }
         switch (ev.data?.type) {
         case 'press':
-            if (getPushToTalkConfig().enabled) {
+            // The desktop app's global key already handles it in this window.
+            if (getPushToTalkConfig().enabled && !isGlobalPttActive()) {
                 client.unmute();
             }
             break;
         case 'release':
-            client.mute();
+            if (!isGlobalPttActive()) {
+                client.mute();
+            }
             break;
         case 'config':
             applyVoiceInputPrefs(client);
@@ -229,14 +235,43 @@ export function initPushToTalk(win: Window = window, options: InitOptions = {}):
         }
     };
 
+    // Mouse buttons (middle, back, forward) as the push-to-talk key, when the key was captured in the desktop app.
+    const mouseCode = (ev: MouseEvent) => ({1: 'Mouse3', 3: 'Mouse4', 4: 'Mouse5'} as {[button: number]: string})[ev.button] ?? '';
+    const asKey = (ev: MouseEvent, code: string) => ({
+        code,
+        repeat: false,
+        isComposing: false,
+        target: ev.target,
+        ctrlKey: ev.ctrlKey,
+        altKey: ev.altKey,
+        metaKey: ev.metaKey,
+        preventDefault: () => ev.preventDefault(),
+    } as unknown as KeyboardEvent);
+    const onMouseDown = (ev: MouseEvent) => {
+        const code = mouseCode(ev);
+        if (code && code === getPushToTalkConfig().code) {
+            handler.onKeyDown(asKey(ev, code));
+        }
+    };
+    const onMouseUp = (ev: MouseEvent) => {
+        const code = mouseCode(ev);
+        if (code && isMouseCode(code)) {
+            handler.onKeyUp(asKey(ev, code));
+        }
+    };
+
     win.document.addEventListener('keydown', handler.onKeyDown, true);
     win.document.addEventListener('keyup', handler.onKeyUp, true);
+    win.document.addEventListener('mousedown', onMouseDown, true);
+    win.document.addEventListener('mouseup', onMouseUp, true);
     win.addEventListener('blur', handler.onFocusLost);
     win.document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
         win.document.removeEventListener('keydown', handler.onKeyDown, true);
         win.document.removeEventListener('keyup', handler.onKeyUp, true);
+        win.document.removeEventListener('mousedown', onMouseDown, true);
+        win.document.removeEventListener('mouseup', onMouseUp, true);
         win.removeEventListener('blur', handler.onFocusLost);
         win.document.removeEventListener('visibilitychange', onVisibility);
         channel?.close();

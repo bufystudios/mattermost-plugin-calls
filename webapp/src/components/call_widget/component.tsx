@@ -56,12 +56,13 @@ import {RingbackContainer} from 'src/components/incoming_calls/ringback_containe
 import {LeaveCallMenu} from 'src/components/leave_call_menu';
 import LiveBadge from 'src/components/live_badge';
 import {JoinLoadingOverlay, VideoLoadingOverlay} from 'src/components/loading_overlays';
+import {NoiseLevelMenuItems} from 'src/components/noise_level';
 import ScreenShareQualityLive from 'src/components/screen_share_quality/live_controls';
 import ScreenShareQualityModal from 'src/components/screen_share_quality/modal';
 import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
 import SpeakingSync from 'src/components/use_speaking';
 import {UserVolumeSlider} from 'src/components/user_volume_control';
-import {NoiseSuppressionMenuItem, PushToTalkHint, ShortcutsMenuItem} from 'src/components/voice_input_menu';
+import {PushToTalkHint, ShortcutsMenuItem} from 'src/components/voice_input_menu';
 import {
     CallAlertConfigs,
     CallRecordingDisclaimerStrings,
@@ -69,6 +70,7 @@ import {
     DEGRADED_CALL_QUALITY_ALERT_WAIT,
     STORAGE_CALLS_MIRROR_VIDEO_KEY,
 } from 'src/constants';
+import {claimMuteToggle, isGlobalMuteActive} from 'src/desktop_bufy';
 import {logDebug, logErr} from 'src/log';
 import {isPushToTalkActive} from 'src/push_to_talk';
 import {serveScreenShareBridge} from 'src/screen_share_bridge';
@@ -383,6 +385,10 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         }
         switch (keyToAction('widget', ev)) {
         case MUTE_UNMUTE:
+            // The desktop app's global mute shortcut can be delivered for the same key press: one toggle only.
+            if (isGlobalMuteActive() && !claimMuteToggle()) {
+                break;
+            }
             this.onMuteToggle();
             break;
         case RAISE_LOWER_HAND:
@@ -1900,7 +1906,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                     {this.renderDevices('audioinput')}
                     {this.props.enableVideo && this.renderDevices('videoinput')}
                     { divider }
-                    <NoiseSuppressionMenuItem/>
+                    <NoiseLevelMenuItems/>
                     <ShortcutsMenuItem isDM={isDMChannel(this.props.channel)}/>
                     { divider }
                     {showScreenShareItem && this.renderScreenSharingMenuItem()}

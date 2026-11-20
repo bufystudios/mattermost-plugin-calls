@@ -317,15 +317,17 @@ describe('CallWidget screen share quality', () => {
     });
 
     describe('voice input hints', () => {
-        test('the widget menu has a noise suppression switch that applies right away, and the shortcut list', () => {
+        test('the widget menu has the noise level list that applies right away, and the shortcut list', () => {
             client.applyNoiseSuppression = jest.fn();
             (window as any).WebappUtils = {openUserSettings: jest.fn()};
             renderWidget();
             fireEvent.click(document.getElementById('calls-widget-toggle-menu-button')!);
 
-            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('On');
-            fireEvent.click(screen.getByTestId('noise-suppression-toggle'));
-            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('Off');
+            // Enhanced is the default level.
+            expect(screen.getByTestId('noise-level-enhanced')).toHaveAttribute('aria-checked', 'true');
+            fireEvent.click(screen.getByTestId('noise-level-off'));
+            expect(screen.getByTestId('noise-level-off')).toHaveAttribute('aria-checked', 'true');
+            expect(window.localStorage.getItem('calls_noise_suppression')).toBe('off');
             expect(client.applyNoiseSuppression).toHaveBeenCalled();
 
             fireEvent.click(screen.getByTestId('shortcuts-toggle'));

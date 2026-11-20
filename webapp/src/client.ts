@@ -43,7 +43,13 @@ import {
     type ShareResolution,
 } from 'src/screen_share_quality';
 import {SpeakingMonitor} from 'src/speaking';
-import {getNoiseSuppression} from 'src/voice_input_prefs';
+import {NoiseController} from 'src/noise/controller';
+import {loadAudioHost, noiseProcessingSupported} from 'src/noise/host';
+import {overloadedLevel} from 'src/noise/fallback';
+import {browserNoiseSuppression, getNoiseLevel, isProcessedLevel, type NoiseLevel} from 'src/voice_input_prefs';
+
+// How long the first unmute waits for a noise filter that is still loading.
+const UnmuteNoiseWaitMs = 1500;
 
 export const AudioInputPermissionsError = new Error('missing audio input permissions');
 export const AudioInputMissingError = new Error('no audio input available');
@@ -89,6 +95,9 @@ export default class CallsClient extends EventEmitter {
     public ws: WebSocketClient | null;
     private localScreenTrack: MediaStreamTrack | null = null;
 
+    // desktopCapturer id (`screen:…` / `window:…`) of the shared source in the desktop app, '' otherwise.
+    private localScreenSourceID = '';
+
     // Quality of the current (or last requested) screen share, see screen_share_quality.ts.
     private screenQuality: ScreenShareQuality | null = null;
 
@@ -105,6 +114,19 @@ export default class CallsClient extends EventEmitter {
     public currentVideoInputDevice: MediaDeviceInfo | null = null;
     private voiceTrackAdded: boolean;
     private videoTrackAdded: boolean;
+
+    // ID of the track the SFU voice sender was last given (RTCPeer keys its senders by it, also while the
+    // sender holds null after a mute). It is the noise filter's output when one runs, the microphone otherwise.
+    private voiceSenderTrackID = '';
+
+    // Noise suppression levels (see noise/controller.ts): the filter's output track, which is sent instead of
+    // the raw microphone track while Enhanced or Maximum run, on the SFU sender and on the P2P sender alike.
+    private noise: NoiseController | null = null;
+    private noiseOutput: MediaStreamTrack | null = null;
+
+    // Bumped by every mute and unmute so an unmute that was waiting (for the noise filter) can tell it was overtaken
+    // (a quick push-to-talk press and release) and leaves the mic closed.
+    private micIntent = 0;
 
     // ID of the track currently held by the video sender. The sender is kept
     // alive for the lifetime of the call (to avoid renegotiation), but the
@@ -191,28 +213,122 @@ export default class CallsClient extends EventEmitter {
         window.addEventListener('beforeunload', this.onBeforeUnload);
     }
 
-    // Noise suppression is a user pref (Calls settings), read every time a track is
-    // requested so a change applies on the next unmute/device change at the latest.
+    // The level the microphone is captured for. A processed level whose filter can't run here (no AudioWorklet or
+    // WebAssembly, or it overloaded this machine before) starts as Standard, so the capture is not opened without
+    // any filtering only to be switched back a moment later.
+    private captureNoiseLevel(): NoiseLevel {
+        const level = getNoiseLevel();
+        if (isProcessedLevel(level) && (!noiseProcessingSupported() || overloadedLevel() === level)) {
+            return 'standard';
+        }
+        return level;
+    }
+
+    // Read every time a track is requested so a change applies on the next unmute/device change at the latest.
     private get defaultAudioTrackOptions(): MediaTrackConstraints {
         return {
             autoGainControl: true,
             echoCancellation: true,
-            noiseSuppression: getNoiseSuppression(),
+            noiseSuppression: browserNoiseSuppression(this.captureNoiseLevel()),
         };
     }
 
-    // Applies the noise suppression pref to the live microphone track. Works on the fly in
-    // Chromium/Electron (no renegotiation: it is the same track). If the browser refuses,
-    // the new value is picked up the next time the track is created (unmute/device change).
+    // The track that goes out as our voice: the noise filter's output while Enhanced/Maximum run, the
+    // microphone track otherwise. Muting still works on the microphone track (a disabled track feeds the filter
+    // silence, and the senders are emptied while muted).
+    private get voiceTrack(): MediaStreamTrack | null {
+        return this.noiseOutput ?? this.audioTrack;
+    }
+
+    private voiceSenderID(): string {
+        return this.voiceSenderTrackID || this.audioTrack?.id || '';
+    }
+
+    // Applies the noise level pref to the live microphone: starts, switches or stops the filter. Resolves when it
+    // runs or has fallen back to Standard (with the reason in the noise status).
     public async applyNoiseSuppression() {
+        const level = getNoiseLevel();
+        if (!this.noise) {
+            // No microphone yet: initAudio starts the controller with the current level.
+            return;
+        }
+        await this.noise.setLevel(level);
+    }
+
+    private startNoise() {
+        const level = getNoiseLevel();
+        if (!this.noise) {
+            this.noise = new NoiseController({
+                getSource: () => (this.audioTrack && this.audioTrack.readyState === 'live' ? this.audioTrack : null),
+                loadHost: () => (noiseProcessingSupported() ? loadAudioHost() : Promise.reject(new Error('audio processing not supported'))),
+                setBrowserNoise: (enabled) => this.setBrowserNoise(enabled),
+                onOutput: (track) => this.onNoiseOutput(track),
+            }, level);
+            this.noise.setMuted(!this.audioTrack?.enabled);
+        }
+        this.noise.setLevel(level).catch((err) => logWarn('failed to apply the noise level', err));
+    }
+
+    // Switches the browser's own noise suppression on the live microphone. Chromium/Electron accept it on the
+    // fly. If the track still reports the old value (some capture devices ignore it) the microphone is opened again.
+    private async setBrowserNoise(enabled: boolean) {
         const track = this.audioTrack;
         if (!track || track.readyState !== 'live') {
             return;
         }
         try {
-            await track.applyConstraints({noiseSuppression: getNoiseSuppression()});
+            await track.applyConstraints({noiseSuppression: enabled});
         } catch (err) {
             logWarn('failed to apply noise suppression on the live track', err);
+        }
+
+        const actual = track.getSettings?.().noiseSuppression;
+        if (actual !== undefined && actual !== enabled && this.currentAudioInputDevice && this.peer) {
+            logDebug('microphone ignored the noise suppression constraint, reopening it');
+            try {
+                await this.reopenAudioInput(enabled);
+            } catch (err) {
+                logWarn('failed to reopen the microphone for the noise level', err);
+            }
+        }
+    }
+
+    // The noise filter's output changed (a new graph, or null: back to the raw microphone track). Both media paths
+    // carry the new track: the SFU voice sender and, through syncP2PMedia, the P2P voice sender.
+    private onNoiseOutput(track: MediaStreamTrack | null) {
+        const before = this.voiceTrack;
+        this.noiseOutput = track;
+        const after = this.voiceTrack;
+        if (!after || after === before) {
+            return;
+        }
+
+        if (this.peer && this.voiceTrackAdded && this.audioTrack?.enabled && !this.p2pActive) {
+            try {
+                this.peer.replaceTrack(this.voiceSenderID(), after);
+                this.voiceSenderTrackID = after.id;
+            } catch (err) {
+                logWarn('failed to switch the voice sender to the new track', err);
+            }
+        }
+        this.syncP2PMedia();
+    }
+
+    // Puts the voice track on the SFU peer: replaces the track of the voice sender, or adds the sender.
+    private async attachVoiceToSFU() {
+        const track = this.voiceTrack;
+        if (!this.peer || !track) {
+            return;
+        }
+        if (this.voiceTrackAdded) {
+            logDebug('replacing track to peer', track.id);
+            this.peer.replaceTrack(this.voiceSenderID(), track);
+            this.voiceSenderTrackID = track.id;
+        } else if (this.stream) {
+            logDebug('adding track to peer', track.id, this.stream.id);
+            await this.peer.addTrack(track, this.stream);
+            this.voiceTrackAdded = true;
+            this.voiceSenderTrackID = track.id;
         }
     }
 
@@ -465,6 +581,7 @@ export default class CallsClient extends EventEmitter {
             this.streams.push(this.stream);
 
             this.audioTrack.enabled = false;
+            this.startNoise();
 
             this.emit('initaudio');
         } catch (err) {
@@ -766,7 +883,7 @@ export default class CallsClient extends EventEmitter {
 
         const videoTrack = this.localVideoStream?.getVideoTracks()[0];
         this.p2p.setLocalMedia({
-            voice: this.audioTrack?.enabled ? this.audioTrack : null,
+            voice: this.audioTrack?.enabled ? this.voiceTrack : null,
             video: videoTrack && videoTrack.enabled && videoTrack.readyState === 'live' ? videoTrack : null,
             screen: this.localScreenTrack,
             screenAudio: this.localScreenAudioTrack,
@@ -805,7 +922,7 @@ export default class CallsClient extends EventEmitter {
         };
 
         if (this.audioTrack && this.voiceTrackAdded) {
-            replaceWithNull(this.audioTrack.id);
+            replaceWithNull(this.voiceSenderID());
         }
         if (this.videoTrackAdded) {
             replaceWithNull(this.videoSenderTrackID);
@@ -828,12 +945,7 @@ export default class CallsClient extends EventEmitter {
 
         try {
             if (this.audioTrack?.enabled && this.stream) {
-                if (this.voiceTrackAdded) {
-                    this.peer.replaceTrack(this.audioTrack.id, this.audioTrack);
-                } else {
-                    await this.peer.addTrack(this.audioTrack, this.stream);
-                    this.voiceTrackAdded = true;
-                }
+                await this.attachVoiceToSFU();
             }
         } catch (err) {
             logErr('failed to resume voice over the SFU', err);
@@ -1037,44 +1149,70 @@ export default class CallsClient extends EventEmitter {
             return;
         }
 
-        const isEnabled = this.audioTrack.enabled;
-        const oldTrack = this.audioTrack;
-
         try {
-            const newStream = await navigator.mediaDevices.getUserMedia({
-                video: false,
-                audio: {
-                    ...this.defaultAudioTrackOptions,
-                    deviceId: {
-                        exact: device.deviceId,
-                    },
-                },
-            });
-            this.streams.push(newStream);
-            const newTrack = newStream.getAudioTracks()[0];
-
-            // Stop old track only after successfully getting new track
-            oldTrack.stop();
-
-            this.stream.removeTrack(oldTrack);
-            this.stream.addTrack(newTrack);
-            newTrack.enabled = isEnabled;
-            if (isEnabled && !this.p2pActive) {
-                // voiceTrackAdded must be true if the track is enabled.
-                logDebug('replacing track to peer', newTrack.id);
-                this.peer.replaceTrack(oldTrack.id, newTrack);
-            } else {
-                // Not sending over the SFU (muted, or media goes peer to peer): the new
-                // track is added to the SFU peer when needed.
-                this.voiceTrackAdded = false;
-            }
-            this.audioTrack = newTrack;
-            this.syncP2PMedia();
-            this.refreshSpeakingMonitor();
+            await this.swapMicrophone(device.deviceId, this.defaultAudioTrackOptions);
         } catch (err) {
             logErr('setAudioInputDevice: failed to switch audio input device', device.deviceId, err);
             throw err;
         }
+    }
+
+    // Opens the current microphone again with the browser's noise suppression set to `enabled` (the fallback of
+    // setBrowserNoise for capture devices that ignore applyConstraints).
+    private async reopenAudioInput(enabled: boolean) {
+        const deviceId = this.currentAudioInputDevice?.deviceId;
+        if (!deviceId) {
+            return;
+        }
+        await this.swapMicrophone(deviceId, {...this.defaultAudioTrackOptions, noiseSuppression: enabled});
+    }
+
+    // Replaces the microphone track by a new one from `deviceId`. The old one is stopped only once the new one
+    // exists. Whatever is being sent keeps going: the senders get the new raw track, or, while a noise filter runs,
+    // keep the filter's output until the filter has been restarted on the new microphone (`sourceChanged`).
+    private async swapMicrophone(deviceId: string, constraints: MediaTrackConstraints) {
+        const oldTrack = this.audioTrack;
+        if (!oldTrack || !this.stream || !this.peer) {
+            return;
+        }
+        const isEnabled = oldTrack.enabled;
+
+        const newStream = await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: {
+                ...constraints,
+                deviceId: {
+                    exact: deviceId,
+                },
+            },
+        });
+        this.streams.push(newStream);
+        const newTrack = newStream.getAudioTracks()[0];
+
+        // Stop old track only after successfully getting new track
+        oldTrack.stop();
+
+        this.stream.removeTrack(oldTrack);
+        this.stream.addTrack(newTrack);
+        newTrack.enabled = isEnabled;
+        if (isEnabled && !this.p2pActive) {
+            // voiceTrackAdded must be true if the track is enabled.
+            if (!this.noiseOutput) {
+                logDebug('replacing track to peer', newTrack.id);
+                this.peer.replaceTrack(this.voiceSenderID(), newTrack);
+                this.voiceSenderTrackID = newTrack.id;
+            }
+        } else {
+            // Not sending over the SFU (muted, or media goes peer to peer): the new
+            // track is added to the SFU peer when needed.
+            this.voiceTrackAdded = false;
+        }
+        this.audioTrack = newTrack;
+        this.syncP2PMedia();
+        this.refreshSpeakingMonitor();
+
+        // A running filter moves to the new microphone.
+        this.noise?.sourceChanged().catch((err) => logWarn('failed to move the noise filter to the new microphone', err));
     }
 
     public async setVideoInputDevice(device: MediaDeviceInfo) {
@@ -1216,6 +1354,9 @@ export default class CallsClient extends EventEmitter {
     }
 
     private cleanup() {
+        this.noise?.dispose(getNoiseLevel());
+        this.noise = null;
+        this.noiseOutput = null;
         this.streams.forEach((s) => {
             s.getTracks().forEach((track) => {
                 track.stop();
@@ -1233,10 +1374,12 @@ export default class CallsClient extends EventEmitter {
             logDebug('replacing track to peer', null);
 
             // @ts-ignore: we actually mean (and need) to pass null here
-            this.peer.replaceTrack(this.audioTrack.id, null);
+            this.peer.replaceTrack(this.voiceSenderID(), null);
         }
 
+        this.micIntent++;
         this.audioTrack.enabled = false;
+        this.noise?.setMuted(true);
         this.syncP2PMedia();
 
         this.emit('mute');
@@ -1269,16 +1412,21 @@ export default class CallsClient extends EventEmitter {
         this.rtcMonitor?.clearCache();
 
         if (this.audioTrack) {
+            const intent = ++this.micIntent;
+
+            // A filter that is still starting (the first unmute right after joining) gets a moment, so the
+            // first words do not go out unfiltered.
+            if (this.noise) {
+                await this.noise.settled(UnmuteNoiseWaitMs);
+                if (intent !== this.micIntent || !this.audioTrack) {
+                    return;
+                }
+                this.noise.setMuted(false);
+            }
+
             // When the media goes peer to peer the SFU peer is updated if we fall back.
             if (!this.p2pActive) {
-                if (this.voiceTrackAdded) {
-                    logDebug('replacing track to peer', this.audioTrack.id);
-                    this.peer.replaceTrack(this.audioTrack.id, this.audioTrack);
-                } else if (this.stream) {
-                    logDebug('adding track to peer', this.audioTrack.id, this.stream.id);
-                    await this.peer.addTrack(this.audioTrack, this.stream);
-                    this.voiceTrackAdded = true;
-                }
+                await this.attachVoiceToSFU();
             }
             this.audioTrack.enabled = true;
             this.syncP2PMedia();
@@ -1290,6 +1438,11 @@ export default class CallsClient extends EventEmitter {
         if (this.ws) {
             this.ws.send('unmute');
         }
+    }
+
+    // The desktopCapturer id of what we are sharing (desktop app), '' when unknown (browser picker) or not sharing.
+    public getLocalScreenSourceID(): string {
+        return this.localScreenTrack ? this.localScreenSourceID : '';
     }
 
     public getLocalScreenStream(): MediaStream|null {
@@ -1701,6 +1854,7 @@ export default class CallsClient extends EventEmitter {
             return null;
         }
 
+        this.localScreenSourceID = sourceID || '';
         await this.setScreenStream(screenStream, shareQuality);
 
         return screenStream;

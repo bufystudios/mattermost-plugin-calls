@@ -13,7 +13,8 @@ import SpeakerIcon from 'src/components/icons/speaker_icon';
 import TickIcon from 'src/components/icons/tick';
 import UnmutedIcon from 'src/components/icons/unmuted_icon';
 import VideoOnIcon from 'src/components/icons/video_on';
-import {NoiseSuppressionMenuItem, ShortcutsMenuItem} from 'src/components/voice_input_menu';
+import {NoiseLevelMenuItems} from 'src/components/noise_level';
+import {ShortcutsMenuItem} from 'src/components/voice_input_menu';
 import {areLiveCaptionsAvailableInCurrentCall, callsConfig} from 'src/selectors';
 import type {
     MediaDevices,
@@ -464,7 +465,7 @@ export function CallSettings({onLiveCaptionsToggle, showLiveCaptions, isDM = fal
                 }
 
                 <li className='MenuGroup menu-divider'/>
-                <NoiseSuppressionMenuItem/>
+                <NoiseLevelMenuItems/>
                 <ShortcutsMenuItem isDM={isDM}/>
 
                 { (showCCButton || showAdditionalSetttingsButton) && <li className='MenuGroup menu-divider'/>}

@@ -4,9 +4,9 @@
 import {act, fireEvent, render, screen} from '@testing-library/react';
 import React from 'react';
 import {createIntl, RawIntlProvider} from 'react-intl';
-import {getNoiseSuppression, getPushToTalkConfig, setNoiseSuppression, setPushToTalkConfig} from 'src/voice_input_prefs';
+import {getPushToTalkConfig, setPushToTalkConfig} from 'src/voice_input_prefs';
 
-import {NoiseSuppressionMenuItem, PushToTalkHint, ShortcutsList, ShortcutsMenuItem} from './voice_input_menu';
+import {PushToTalkHint, ShortcutsList, ShortcutsMenuItem} from './voice_input_menu';
 
 const intl = createIntl({locale: 'en', messages: {}});
 const wrap = (ui: React.ReactElement) => render(<RawIntlProvider value={intl}>{ui}</RawIntlProvider>);
@@ -21,40 +21,6 @@ describe('voice input menu items', () => {
     afterEach(() => {
         delete (window as any).callsClient;
         window.localStorage.clear();
-    });
-
-    describe('noise suppression toggle', () => {
-        it('shows the current state, On by default', () => {
-            wrap(<NoiseSuppressionMenuItem/>);
-            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('On');
-            expect(screen.getByRole('menuitemcheckbox')).toHaveAttribute('aria-checked', 'true');
-        });
-
-        it('turns it off and on, applying it to the live microphone each time', () => {
-            wrap(<NoiseSuppressionMenuItem/>);
-
-            fireEvent.click(screen.getByTestId('noise-suppression-toggle'));
-            expect(getNoiseSuppression()).toBe(false);
-            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('Off');
-            expect(client.applyNoiseSuppression).toHaveBeenCalledTimes(2); // notify + the client of the call window
-
-            fireEvent.click(screen.getByTestId('noise-suppression-toggle'));
-            expect(getNoiseSuppression()).toBe(true);
-            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('On');
-        });
-
-        it('follows a change made in the settings dialog', () => {
-            wrap(<NoiseSuppressionMenuItem/>);
-            act(() => setNoiseSuppression(false));
-            expect(screen.getByTestId('noise-suppression-state')).toHaveTextContent('Off');
-        });
-
-        it('does not fail when there is no call client in this window', () => {
-            delete (window as any).callsClient;
-            wrap(<NoiseSuppressionMenuItem/>);
-            fireEvent.click(screen.getByTestId('noise-suppression-toggle'));
-            expect(getNoiseSuppression()).toBe(false);
-        });
     });
 
     describe('push to talk hint', () => {

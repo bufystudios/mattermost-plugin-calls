@@ -39,11 +39,13 @@ import {setServerVersion} from 'mattermost-redux/actions/general';
 import {Client4} from 'mattermost-redux/client';
 import {getChannel} from 'mattermost-redux/selectors/entities/channels';
 import {getConfig} from 'mattermost-redux/selectors/entities/general';
+import {getCurrentUserLocale} from 'mattermost-redux/selectors/entities/i18n';
 import {getTheme, Theme} from 'mattermost-redux/selectors/entities/preferences';
 import configureStore from 'mattermost-redux/store';
 import {ActionFuncAsync} from 'mattermost-redux/types/actions';
 import {getCallActive, getCallsConfig, getCallsVersionInfo, localSessionClose, setClientConnecting} from 'plugin/actions';
 import CallsClient from 'plugin/client';
+import {attachDesktopIntegration, desktopIntegrationOptions} from 'plugin/desktop_bufy';
 import {
     logDebug,
     logErr,
@@ -120,6 +122,9 @@ function connectCall(
 
         window.callsClient = new CallsClient(clientConfig);
         window.currentCallData = {...CurrentCallDataDefault};
+
+        // Desktop app fork: global push to talk, share border, tray (no-op without window.desktopAPI.bufy).
+        attachDesktopIntegration(window.callsClient, desktopIntegrationOptions(() => getCallTitle() || 'Call', () => getCurrentUserLocale(store.getState())));
         const unsubscribeP2PSync = syncP2PContext(store, window.callsClient);
 
         window.callsClient.on('connect', () => store.dispatch(setClientConnecting(false)));

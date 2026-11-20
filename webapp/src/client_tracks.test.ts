@@ -128,7 +128,9 @@ describe('CallsClient noise suppression', () => {
         window.localStorage.clear();
     });
 
-    it('is on by default', () => {
+    // jsdom has no AudioWorklet or WebAssembly audio, so the processed levels (the default, Enhanced) cannot run
+    // here and the capture starts with the browser's own filter, like Standard.
+    it('captures with the browser filter by default when the processed levels cannot run', () => {
         expect(client.defaultAudioTrackOptions).toEqual({
             autoGainControl: true,
             echoCancellation: true,
@@ -136,26 +138,38 @@ describe('CallsClient noise suppression', () => {
         });
     });
 
-    it('follows the user pref when new tracks are requested', () => {
-        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'false');
+    it('follows the user level when new tracks are requested', () => {
+        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'off');
+        expect(client.defaultAudioTrackOptions.noiseSuppression).toBe(false);
 
+        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'standard');
+        expect(client.defaultAudioTrackOptions.noiseSuppression).toBe(true);
+    });
+
+    it('reads the old boolean pref', () => {
+        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'false');
         expect(client.defaultAudioTrackOptions.noiseSuppression).toBe(false);
     });
 
-    it('applies the pref on the live microphone track without recreating it', async () => {
+    it('applies Off and Standard on the live microphone track without recreating it', async () => {
         const mic = track('audio', 'mic');
         client.audioTrack = mic;
-        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'false');
-
+        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'off');
+        client.startNoise();
         await client.applyNoiseSuppression();
+        expect(mic.applyConstraints).toHaveBeenLastCalledWith({noiseSuppression: false});
 
-        expect(mic.applyConstraints).toHaveBeenCalledWith({noiseSuppression: false});
+        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'standard');
+        await client.applyNoiseSuppression();
+        expect(mic.applyConstraints).toHaveBeenLastCalledWith({noiseSuppression: true});
     });
 
     it('survives a browser that refuses to change constraints on a live track', async () => {
         const mic = track('audio', 'mic');
         mic.applyConstraints.mockRejectedValue(new Error('OverconstrainedError'));
         client.audioTrack = mic;
+        window.localStorage.setItem(STORAGE_CALLS_NOISE_SUPPRESSION_KEY, 'standard');
+        client.startNoise();
 
         await expect(client.applyNoiseSuppression()).resolves.toBeUndefined();
     });

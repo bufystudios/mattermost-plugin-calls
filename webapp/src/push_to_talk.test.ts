@@ -1,6 +1,7 @@
 // Copyright (c) 2020-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+import * as desktop from './desktop_bufy';
 import {initPushToTalk, isTypingTarget, PushToTalkHandler} from './push_to_talk';
 import {getPushToTalkConfig, keyCodeLabel, pushToTalkDisabled, setPushToTalkConfig} from './voice_input_prefs';
 
@@ -205,6 +206,43 @@ describe('initPushToTalk', () => {
         document.dispatchEvent(keyEvent('keyup', 'KeyV'));
         expect(client.mute).toHaveBeenCalledTimes(1);
 
+        dispose();
+    });
+
+    it('stays out of the way while the desktop app has the key registered globally (no double trigger)', () => {
+        setPushToTalkConfig({enabled: true, code: 'KeyV'});
+        const spy = jest.spyOn(desktop, 'isGlobalPttActive').mockReturnValue(true);
+        const client = {mute: jest.fn(), unmute: jest.fn()};
+        const dispose = initPushToTalk(window, {getClient: () => client});
+
+        document.dispatchEvent(keyEvent('keydown', 'KeyV'));
+        document.dispatchEvent(keyEvent('keyup', 'KeyV'));
+        expect(client.unmute).not.toHaveBeenCalled();
+        expect(client.mute).not.toHaveBeenCalled();
+
+        // The global registration went away (call ended, setting turned off): the in-window key works again.
+        spy.mockReturnValue(false);
+        document.dispatchEvent(keyEvent('keydown', 'KeyV'));
+        expect(client.unmute).toHaveBeenCalledTimes(1);
+        document.dispatchEvent(keyEvent('keyup', 'KeyV'));
+
+        spy.mockRestore();
+        dispose();
+    });
+
+    it('a mouse button chosen as the key works in the window too', () => {
+        setPushToTalkConfig({enabled: true, code: 'Mouse4'});
+        const client = {mute: jest.fn(), unmute: jest.fn()};
+        const dispose = initPushToTalk(window, {getClient: () => client});
+
+        document.dispatchEvent(new MouseEvent('mousedown', {button: 3, bubbles: true, cancelable: true}));
+        expect(client.unmute).toHaveBeenCalledTimes(1);
+        document.dispatchEvent(new MouseEvent('mouseup', {button: 3, bubbles: true}));
+        expect(client.mute).toHaveBeenCalledTimes(1);
+
+        // The left button is never a talk key.
+        document.dispatchEvent(new MouseEvent('mousedown', {button: 0, bubbles: true}));
+        expect(client.unmute).toHaveBeenCalledTimes(1);
         dispose();
     });
 

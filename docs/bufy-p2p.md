@@ -126,8 +126,9 @@ simply never answers and the offerer falls back after 5 s.
 
 ## Known limitations
 
-- **Speaking indicator**: it is computed by the SFU from the audio it receives, so while in `p2p` the other
-  person's "speaking" highlight does not light up (mute state, raised hand, reactions are unaffected).
+- **Speaking indicator**: in SFU mode it is computed by the server from the audio it receives. While in `p2p`
+  the server gets no audio, so the client measures the levels itself (WebAudio analyser on the own mic and the
+  peer's voice track, see `webapp/src/speaking.ts` and `docs/bufy-dm-ux.md`).
 - Client stats/MOS monitoring only look at the SFU connection.
 - Privacy: the two participants learn each other's IP address (stated in the setting's help text).
 - No simulcast/dynamic quality adaptation beyond the browser's own congestion control.

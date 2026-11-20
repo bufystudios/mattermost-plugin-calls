@@ -26,6 +26,7 @@ import {
     hostIDForCurrentCall,
     isCurrentDMCallInCallingState,
     isRecordingInCurrentCall,
+    localSpeakingSessions,
     profilesInCurrentCallMap,
     recordingForCurrentCall,
     recordingMaxDuration,
@@ -98,6 +99,7 @@ const mapStateToProps = (state: GlobalState) => {
         otherSessions: sessionsForOtherUsersInCall(state),
         isDMCalling: isCurrentDMCallInCallingState(state),
         clientConnecting: clientConnecting(state),
+        localSpeaking: localSpeakingSessions(state),
     };
 };
 

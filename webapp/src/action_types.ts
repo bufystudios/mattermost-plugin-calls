@@ -64,3 +64,5 @@ export const DESKTOP_WIDGET_CONNECTED = pluginId + '_desktop_widget_connected';
 export const CLIENT_CONNECTING = pluginId + '_client_connecting';
 export const LOCAL_SESSION_CLOSE = pluginId + '_local_session_close';
 
+// Speaking state measured by the client itself (P2P calls, where the server's voice activity detection gets no audio).
+export const LOCAL_SPEAKING = pluginId + '_local_speaking';

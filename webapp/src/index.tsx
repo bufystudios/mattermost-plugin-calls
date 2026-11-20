@@ -98,8 +98,10 @@ import {makeSameChannelLinkClickHandler} from 'src/components/same_channel_link_
 import AudioDevicesSettingsSection from 'src/components/user_settings/audio_devices_settings_section';
 import ScreenSharingSettingsSection from 'src/components/user_settings/screen_sharing_settings_section';
 import VideoDevicesSettingsSection from 'src/components/user_settings/video_devices_settings_section';
+import VoiceInputSettingsSection from 'src/components/user_settings/voice_input_settings_section';
 import {CALL_EVENT_POST_TYPE, CALL_RECORDING_POST_TYPE, CALL_TRANSCRIPTION_POST_TYPE, DisabledCallsErr} from 'src/constants';
 import {desktopNotificationHandler} from 'src/desktop_notifications';
+import {initPushToTalk} from 'src/push_to_talk';
 import RestClient from 'src/rest_client';
 import slashCommandsHandler from 'src/slash_commands';
 import {CallActions, CurrentCallData, CurrentCallDataDefault} from 'src/types/types';
@@ -378,6 +380,10 @@ export default class Plugin {
                 {
                     title: 'Audio devices settings',
                     component: AudioDevicesSettingsSection,
+                },
+                {
+                    title: 'Voice input settings',
+                    component: VoiceInputSettingsSection,
                 },
                 {
                     title: 'Screen sharing settings',
@@ -1037,6 +1043,10 @@ export default class Plugin {
                     component: AudioDevicesSettingsSection,
                 },
                 {
+                    title: 'Voice input settings',
+                    component: VoiceInputSettingsSection,
+                },
+                {
                     title: 'Screen sharing settings',
                     component: ScreenSharingSettingsSection,
                 },
@@ -1179,6 +1189,12 @@ export default class Plugin {
 
         document.addEventListener('keydown', handleKBShortcuts, true);
         this.unsubscribers.push(() => document.removeEventListener('keydown', handleKBShortcuts, true));
+
+        // Push-to-talk (off unless the user enabled it in the Calls settings). In the desktop app the
+        // call lives in the widget window, so key presses in this window are forwarded to it.
+        this.unsubscribers.push(initPushToTalk(window, {
+            isInCall: () => Boolean(channelIDForCurrentCall(store.getState())),
+        }));
     }
 
     uninitialize() {

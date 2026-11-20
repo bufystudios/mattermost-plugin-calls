@@ -20,6 +20,7 @@ import CallWidget from 'plugin/components/call_widget';
 import {
     logDebug,
 } from 'plugin/log';
+import {initPushToTalk} from 'plugin/push_to_talk';
 import {Store} from 'plugin/types/mattermost-webapp';
 import {
     getTranslations,
@@ -101,6 +102,10 @@ async function initWidget({store, startingCall}: InitCbProps) {
             },
         });
     });
+
+    // Push-to-talk while this (desktop widget) window has focus. Key presses in the main window
+    // are forwarded to this window (see push_to_talk.ts).
+    initPushToTalk(window);
 
     const rootEl = document.getElementById('root');
     if (rootEl) {

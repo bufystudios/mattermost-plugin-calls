@@ -7,6 +7,7 @@ import {Client4} from 'mattermost-redux/client';
 import React, {CSSProperties} from 'react';
 import {useIntl} from 'react-intl';
 import Avatar from 'src/components/avatar/avatar';
+import {speakingRing} from 'src/components/avatar/speaking_ring';
 import {HostBadge} from 'src/components/badge';
 import DotMenu, {DotMenuButton} from 'src/components/dot_menu/dot_menu';
 import {Emoji} from 'src/components/emoji/emoji';
@@ -14,11 +15,12 @@ import {StyledDropdownMenu} from 'src/components/expanded_view/styled_components
 import {HostControlsMenu} from 'src/components/host_controls_menu';
 import HandEmoji from 'src/components/icons/hand';
 import MutedIcon from 'src/components/icons/muted_icon';
-import ScreenIcon from 'src/components/icons/screen_icon';
 import {ThreeDotsButton} from 'src/components/icons/three_dots';
 import UnmutedIcon from 'src/components/icons/unmuted_icon';
 import VideoOnIcon from 'src/components/icons/video_on';
+import LiveBadge from 'src/components/live_badge';
 import {useHostControls} from 'src/components/use_host_controls';
+import {useIsSessionSpeaking} from 'src/components/use_speaking';
 import {getUserDisplayName} from 'src/utils';
 import styled, {css} from 'styled-components';
 
@@ -38,7 +40,7 @@ const CallParticipantRHS = ({session, profile, isYou, isHost, iAmHost, isSharing
     const {hoverOn, hoverOff, onOpenChange, showHostControls} = useHostControls(isYou, isHost, iAmHost);
 
     const isMuted = !session.unmuted;
-    const isSpeaking = Boolean(session.voice);
+    const isSpeaking = useIsSessionSpeaking(session);
     const isHandRaised = Boolean(session.raised_hand > 0);
     let youStyle: CSSProperties = {color: 'rgba(var(--center-channel-color-rgb), 0.56)'};
     if (isYou && isHost) {
@@ -62,7 +64,7 @@ const CallParticipantRHS = ({session, profile, isYou, isHost, iAmHost, isSharing
                 size={24}
                 fontSize={10}
                 border={false}
-                borderGlowWidth={isSpeaking ? 2 : 0}
+                {...speakingRing(isSpeaking)}
                 url={Client4.getProfilePictureUrl(profile.id, profile.last_picture_update)}
             />
 
@@ -126,10 +128,7 @@ const CallParticipantRHS = ({session, profile, isYou, isHost, iAmHost, isSharing
                 }
 
                 {isSharingScreen &&
-                    <ScreenIcon
-                        fill={'rgb(var(--dnd-indicator-rgb))'}
-                        style={{width: '16px', height: '16px'}}
-                    />
+                    <LiveBadge small={true}/>
                 }
 
                 {showHostControls &&

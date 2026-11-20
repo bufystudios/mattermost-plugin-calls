@@ -171,6 +171,9 @@ export const CurrentCallDataDefault: CurrentCallData = {
 // owning window. recordingPromptDismissedAt should be set by that window's init function or constructor.
 export type CallActions = {
     setRecordingPromptDismissedAt: (callId: string, dismissedAt: number) => void;
+
+    // Session of the share being watched in the call widget, if any (see src/screen_watch.ts).
+    getWatchedScreenSession?: () => string | null;
     setMissingScreenPermissions: (missing: boolean) => void;
 }
 

@@ -109,6 +109,7 @@ const props: Props = {
     connectedDMUser: undefined,
     isAdmin: false,
     isDMCalling: false,
+    localSpeaking: {},
 };
 
 describe('CallWidget', () => {
@@ -123,6 +124,8 @@ describe('CallWidget', () => {
             disconnect,
             channelID: 'channel-id',
             getRemoteVoiceTracks: () => [],
+            getRemoteTrackSessionID: () => undefined,
+            getSpeakingSessions: () => [],
             getRemoteScreenStream: () => null,
             getLocalScreenStream: () => null,
             on: jest.fn(),
@@ -223,6 +226,8 @@ describe('leave button behavior', () => {
             disconnect,
             channelID: 'channel-id',
             getRemoteVoiceTracks: () => [],
+            getRemoteTrackSessionID: () => undefined,
+            getSpeakingSessions: () => [],
             getRemoteScreenStream: () => null,
             getLocalScreenStream: () => null,
             on: jest.fn(),
@@ -409,6 +414,8 @@ describe('DM call presentation', () => {
             channelID: dmChannelID,
             getSessionID: () => ownSession.session_id,
             getRemoteVoiceTracks: () => [],
+            getRemoteTrackSessionID: () => undefined,
+            getSpeakingSessions: () => [],
             getRemoteScreenStream: () => null,
             getLocalScreenStream: () => null,
             on: jest.fn(),
@@ -578,6 +585,8 @@ describe('DM call presentation with video enabled', () => {
             channelID: dmChannelID,
             getSessionID: () => ownSession.session_id,
             getRemoteVoiceTracks: () => [],
+            getRemoteTrackSessionID: () => undefined,
+            getSpeakingSessions: () => [],
             getRemoteScreenStream: () => null,
             getLocalScreenStream: () => null,
             on: jest.fn(),

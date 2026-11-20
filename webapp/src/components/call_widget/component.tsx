@@ -13,12 +13,13 @@ import {UserProfile} from '@mattermost/types/users';
 import {IDMappedObjects} from '@mattermost/types/utilities';
 import {Client4} from 'mattermost-redux/client';
 import React, {CSSProperties, useEffect, useState} from 'react';
-import {FormattedMessage, IntlShape} from 'react-intl';
+import {FormattedMessage, IntlShape, useIntl} from 'react-intl';
 import {compareSemVer} from 'semver-parser';
 import {hostRemove} from 'src/actions';
 import {navigateToURL} from 'src/browser_routing';
 import {AudioInputPermissionsError, VideoInputPermissionsError} from 'src/client';
 import Avatar from 'src/components/avatar/avatar';
+import {speakingRing} from 'src/components/avatar/speaking_ring';
 import {Badge} from 'src/components/badge';
 import {CallStatusTimer} from 'src/components/call_status_timer';
 import {ParticipantsList} from 'src/components/call_widget/participants_list';
@@ -53,7 +54,11 @@ import VideoOnIcon from 'src/components/icons/video_on';
 import {CallIncomingCondensed} from 'src/components/incoming_calls/call_incoming_condensed';
 import {RingbackContainer} from 'src/components/incoming_calls/ringback_container';
 import {LeaveCallMenu} from 'src/components/leave_call_menu';
+import LiveBadge from 'src/components/live_badge';
 import {JoinLoadingOverlay, VideoLoadingOverlay} from 'src/components/loading_overlays';
+import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
+import SpeakingSync from 'src/components/use_speaking';
+import {UserVolumeSlider} from 'src/components/user_volume_control';
 import {
     CallAlertConfigs,
     CallRecordingDisclaimerStrings,
@@ -62,6 +67,8 @@ import {
     STORAGE_CALLS_MIRROR_VIDEO_KEY,
 } from 'src/constants';
 import {logDebug, logErr} from 'src/log';
+import {isPushToTalkActive} from 'src/push_to_talk';
+import {reconcileWatch, startWatching, streamView, type WatchState} from 'src/screen_watch';
 import {
     keyToAction,
     LEAVE_CALL,
@@ -71,6 +78,7 @@ import {
     reverseKeyMappings,
     SHARE_UNSHARE_SCREEN,
 } from 'src/shortcuts';
+import {isSessionSpeaking, type LocalSpeakingState} from 'src/speaking';
 import {ModalData} from 'src/types/mattermost-webapp';
 import {
     CallAlertStates,
@@ -81,6 +89,7 @@ import {
     MediaDevices,
     RemoveConfirmationData,
 } from 'src/types/types';
+import {RemoteAudioVolumes} from 'src/user_volume';
 import {
     getPopOutURL,
     getUserDisplayName,
@@ -93,6 +102,7 @@ import {
     untranslatable,
 } from 'src/utils';
 import {serverDismissedAt} from 'src/utils/clock_skew';
+import {getPushToTalkConfig, keyCodeLabel} from 'src/voice_input_prefs';
 import styled, {css} from 'styled-components';
 
 import {CallParticipantAvatar} from './call_participant_avatar';
@@ -148,6 +158,7 @@ interface Props {
     connectedDMUser: UserProfile | undefined,
     isAdmin: boolean,
     isDMCalling: boolean,
+    localSpeaking: LocalSpeakingState,
 }
 
 interface DraggingState {
@@ -164,6 +175,12 @@ interface State {
     showMenu: boolean,
     showParticipantsList: boolean,
     screenStream: MediaStream | null,
+
+    // Session of the share the user chose to watch (click-to-watch, see src/screen_watch.ts).
+    watchingScreen: WatchState,
+
+    // User whose local volume slider is open.
+    volumeUserID: string | null,
     selfVideoStream: MediaStream | null,
     initializingSelfVideo: boolean,
     otherVideoStream: MediaStream | null,
@@ -308,6 +325,12 @@ export default class CallWidget extends React.PureComponent<Props, State> {
 
     private style = this.genStyle();
 
+    // Local, per-user playback volume of the remote voices (see src/user_volume.ts).
+    private audioVolumes = new RemoteAudioVolumes(
+        (sessionID) => this.props.sessionsMap[sessionID]?.user_id,
+        () => window.callsClient?.currentAudioOutputDevice?.deviceId,
+    );
+
     constructor(props: Props) {
         super(props);
         this.state = {
@@ -325,6 +348,8 @@ export default class CallWidget extends React.PureComponent<Props, State> {
             audioEls: [],
             alerts: CallAlertStatesDefault,
             screenStream: null,
+            watchingScreen: null,
+            volumeUserID: null,
             removeConfirmation: null,
             leaveMenuOpen: false,
             selfVideoStream: null,
@@ -411,7 +436,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         }
     };
 
-    private attachVoiceTracks(tracks: MediaStreamTrack[]) {
+    private attachVoiceTracks(tracks: MediaStreamTrack[], sessionID?: string) {
         const audioEls = [];
         for (const track of tracks) {
             const audioEl = document.createElement('audio');
@@ -429,7 +454,11 @@ export default class CallWidget extends React.PureComponent<Props, State> {
             }
 
             document.body.appendChild(audioEl);
+
+            // The sender of the track (SFU and P2P) is what the per-user volume is applied by.
+            this.audioVolumes.add(audioEl, sessionID ?? window.callsClient?.getRemoteTrackSessionID(track.id));
             track.onended = () => {
+                this.audioVolumes.remove(audioEl);
                 audioEl.srcObject = null;
                 audioEl.remove();
             };
@@ -508,11 +537,14 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         window.callActions = {
             setRecordingPromptDismissedAt: this.props.recordingPromptDismissedAt,
             setMissingScreenPermissions: this.setMissingScreenPermissions,
+
+            // Lets the pop out start with the stream already being watched.
+            getWatchedScreenSession: () => this.state.watchingScreen,
         };
 
         this.attachVoiceTracks(window.callsClient.getRemoteVoiceTracks());
-        window.callsClient.on('remoteVoiceStream', (stream: MediaStream) => {
-            this.attachVoiceTracks(stream.getAudioTracks());
+        window.callsClient.on('remoteVoiceStream', (stream: MediaStream, sessionID?: string) => {
+            this.attachVoiceTracks(stream.getAudioTracks(), sessionID);
         });
 
         // eslint-disable-next-line react/no-did-mount-set-state
@@ -714,6 +746,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
     public componentWillUnmount() {
         this.unsubscribers.forEach((unsubscribe) => unsubscribe());
         this.unsubscribers = [];
+        this.audioVolumes.destroy();
 
         if (this.widgetResizerObserver) {
             this.widgetResizerObserver.disconnect();
@@ -727,6 +760,20 @@ export default class CallWidget extends React.PureComponent<Props, State> {
     public componentDidUpdate(prevProps: Props, prevState: State) {
         if (this.screenPlayer && this.state.screenStream !== prevState.screenStream) {
             this.screenPlayer.srcObject = this.state.screenStream;
+        }
+
+        // A remote track can arrive before its session shows up in the call state.
+        if (prevProps.sessionsMap !== this.props.sessionsMap) {
+            this.audioVolumes.applyAll();
+        }
+
+        // Watching only lasts for the share that was clicked: a new share starts as a LIVE card.
+        if (prevProps.screenSharingSession?.session_id !== this.props.screenSharingSession?.session_id) {
+            const watching = reconcileWatch(this.state.watchingScreen, this.props.screenSharingSession?.session_id);
+            if (watching !== this.state.watchingScreen) {
+                // eslint-disable-next-line react/no-did-update-set-state
+                this.setState({watchingScreen: watching});
+            }
         }
     }
 
@@ -926,6 +973,11 @@ export default class CallWidget extends React.PureComponent<Props, State> {
             return;
         }
 
+        // With push-to-talk on, the mic is only open while the key is held.
+        if (isPushToTalkActive()) {
+            return;
+        }
+
         // This is needed to prevent a conflict with the accessibility controller on buttons.
         if (document.activeElement instanceof HTMLElement) {
             document.activeElement.blur();
@@ -1083,6 +1135,32 @@ export default class CallWidget extends React.PureComponent<Props, State> {
 
         const msg = isSharing ? formatMessage({defaultMessage: 'You\'re sharing your screen'}) : formatMessage({defaultMessage: 'You\'re viewing {presenter}\'s screen'}, {presenter: getUserDisplayName(profile)});
 
+        // Viewers see a LIVE card until they choose to watch (the share is not auto-opened).
+        const view = streamView({
+            sharerSessionID: this.props.screenSharingSession.session_id,
+            mySessionID: this.props.currentSession?.session_id,
+            watching: this.state.watchingScreen,
+        });
+        if (view === 'live-card' && profile) {
+            return (
+                <div
+                    className='Menu'
+                    style={{display: 'flex', position: 'relative', zIndex: 1000}}
+                >
+                    <ul
+                        className='Menu__content dropdown-menu'
+                        style={this.style.screenSharingPanel}
+                    >
+                        <LiveStreamCard
+                            profile={profile}
+                            compact={true}
+                            onWatch={this.onWatchStream}
+                        />
+                    </ul>
+                </div>
+            );
+        }
+
         return (
             <div
                 className='Menu'
@@ -1172,6 +1250,12 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                     >
                         {msg}
                     </span>
+                    {!isSharing &&
+                        <StreamActions
+                            getVideo={() => this.screenPlayer}
+                            onStopWatching={this.onStopWatchingStream}
+                        />
+                    }
                 </ul>
             </div>
         );
@@ -2311,6 +2395,44 @@ export default class CallWidget extends React.PureComponent<Props, State> {
         );
     };
 
+    onVolumeToggle = (userID: string) => {
+        this.setState({volumeUserID: this.state.volumeUserID === userID ? null : userID});
+    };
+
+    onWatchStream = () => {
+        this.setState({watchingScreen: startWatching(this.props.screenSharingSession?.session_id)});
+    };
+
+    onStopWatchingStream = () => {
+        this.setState({watchingScreen: null});
+    };
+
+    // In the flow (not a popover) because the size of the desktop widget window follows its content.
+    renderVolumePanel = () => {
+        const userID = this.state.volumeUserID;
+        if (!userID || !this.props.otherSessions.some((s) => s.user_id === userID)) {
+            return null;
+        }
+        const profile = this.props.profiles[userID] || this.props.connectedDMUser;
+
+        return (
+            <div
+                className='Menu'
+                style={{display: 'flex', position: 'relative', zIndex: 1000}}
+            >
+                <ul
+                    className='Menu__content dropdown-menu'
+                    style={{...this.style.screenSharingPanel, padding: '12px 16px', alignItems: 'stretch'}}
+                >
+                    <UserVolumeSlider
+                        userID={userID}
+                        name={profile ? getUserDisplayName(profile) : ''}
+                    />
+                </ul>
+            </div>
+        );
+    };
+
     renderProfiles = () => {
         // Here we are assuming this only renders in a DM which is the case
         // right now.
@@ -2328,12 +2450,13 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                 <CallsWidgetProfile
                     videoStream={this.state.selfVideoStream}
                     profile={selfProfile}
-                    isSpeaking={Boolean(selfSession?.voice)}
+                    isSpeaking={isSessionSpeaking(selfSession, this.props.localSpeaking)}
                     isMuted={!calleePending && Boolean(selfSession) && !selfSession?.unmuted}
                     hasVideo={Boolean(selfSession?.video)}
                     videoView={videoView}
                     mirrorVideo={localStorage.getItem(STORAGE_CALLS_MIRROR_VIDEO_KEY) === 'true'}
                     singleSession={selfOnly}
+                    isLive={Boolean(selfSession) && this.props.screenSharingSession?.session_id === selfSession?.session_id}
                     testID='calls-widget-profile-self'
                 />
                 }
@@ -2356,11 +2479,14 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                 <CallsWidgetProfile
                     videoStream={this.state.otherVideoStream}
                     profile={otherProfile}
-                    isSpeaking={Boolean(otherSession.voice)}
+                    isSpeaking={isSessionSpeaking(otherSession, this.props.localSpeaking)}
                     isMuted={!otherSession.unmuted}
                     hasVideo={Boolean(otherSession.video)}
                     videoView={videoView}
                     mirrorVideo={false}
+                    isLive={this.props.screenSharingSession?.session_id === otherSession.session_id}
+                    volumeOpen={this.state.volumeUserID === otherProfile.id}
+                    onVolumeToggle={() => this.onVolumeToggle(otherProfile.id)}
                     testID='calls-widget-profile-other'
                 />
                 }
@@ -2409,6 +2535,10 @@ export default class CallWidget extends React.PureComponent<Props, State> {
             muteTooltipText = formatMessage(CallAlertConfigs.missingAudioInputPermissions.tooltipText!);
             muteTooltipSubtext = formatMessage(CallAlertConfigs.missingAudioInputPermissions.tooltipSubtext!);
         }
+        if (!noInputDevices && !noAudioPermissions && isPushToTalkActive()) {
+            muteTooltipText = formatMessage({defaultMessage: 'Push to talk is on'});
+            muteTooltipSubtext = formatMessage({defaultMessage: 'Hold {key} to talk'}, {key: keyCodeLabel(getPushToTalkConfig().code)});
+        }
 
         const mainStyle = {
             ...this.style.main,
@@ -2456,6 +2586,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                 ref={this.node}
             >
                 <RingbackContainer/>
+                <SpeakingSync/>
                 <JoinLoadingOverlay
                     visible={this.props.clientConnecting}
                     joining={this.props.global ? !this.props.startingCall : this.props.sessions.length > 0}
@@ -2479,6 +2610,7 @@ export default class CallWidget extends React.PureComponent<Props, State> {
                         />
                     }
                     {this.props.allowScreenSharing && this.renderScreenSharingPanel()}
+                    {this.renderVolumePanel()}
                     {this.state.showParticipantsList &&
                         <ParticipantsList
                             sessions={this.props.sessions}
@@ -2854,6 +2986,36 @@ const WidgetProfileContainer = styled.div<{$videoView: boolean, $singleSession?:
   `}
 `;
 
+const LiveBadgeWrap = styled.div`
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+`;
+
+const VolumeToggle = styled.button<{$active: boolean}>`
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: ${({$active}) => ($active ? 'var(--button-bg)' : 'rgba(20, 33, 62, 0.72)')};
+  color: white;
+  cursor: pointer;
+  opacity: ${({$active}) => ($active ? 1 : 0.7)};
+
+  // The widget window of the desktop app is a drag region otherwise swallowing clicks.
+  -webkit-app-region: no-drag;
+
+  &:hover {
+    opacity: 1;
+  }
+`;
+
 const MuteState = styled.div<{ $isMuted: boolean }>`
   position: absolute;
   bottom: 4px;
@@ -2889,10 +3051,16 @@ type CallsWidgetProfileProps = {
     mirrorVideo: boolean;
     singleSession?: boolean;
     ringing?: boolean;
+    isLive?: boolean;
+
+    // Only for the other participant: toggles their local volume slider.
+    volumeOpen?: boolean;
+    onVolumeToggle?: () => void;
     testID?: string;
 }
 
 const CallsWidgetProfile = (props: CallsWidgetProfileProps) => {
+    const intl = useIntl();
     const MuteIcon = props.isMuted ? MutedIcon : UnmutedIcon;
 
     const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
@@ -2920,9 +3088,8 @@ const CallsWidgetProfile = (props: CallsWidgetProfileProps) => {
                 size={40}
                 border={false}
                 url={Client4.getProfilePictureUrl(props.profile.id, props.profile.last_picture_update)}
-                borderGlowWidth={props.isSpeaking ? 3 : 0}
+                {...speakingRing(props.isSpeaking)}
                 className={props.ringing ? 'pulsingAnimation' : ''}
-                borderGlowColor='white'
             />
             }
 
@@ -2933,6 +3100,26 @@ const CallsWidgetProfile = (props: CallsWidgetProfileProps) => {
                 muted={true}
                 $mirror={props.mirrorVideo}
             />
+            }
+
+            {props.isLive &&
+            <LiveBadgeWrap>
+                <LiveBadge small={true}/>
+            </LiveBadgeWrap>
+            }
+
+            {props.onVolumeToggle &&
+            <VolumeToggle
+                className='style--none'
+                aria-label={intl.formatMessage({defaultMessage: 'Volume for {name}'}, {name: getUserDisplayName(props.profile)})}
+                aria-expanded={Boolean(props.volumeOpen)}
+                title={intl.formatMessage({defaultMessage: 'Volume for {name}'}, {name: getUserDisplayName(props.profile)})}
+                data-testid='calls-widget-volume-button'
+                $active={Boolean(props.volumeOpen)}
+                onClick={props.onVolumeToggle}
+            >
+                <SpeakerIcon style={{width: '12px', height: '12px', fill: 'currentColor'}}/>
+            </VolumeToggle>
             }
 
             {props.isMuted &&

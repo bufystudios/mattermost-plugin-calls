@@ -7,6 +7,7 @@ import {IDMappedObjects} from '@mattermost/types/utilities';
 import {Client4} from 'mattermost-redux/client';
 import React from 'react';
 import Avatar from 'src/components/avatar/avatar';
+import {useLocalSpeaking} from 'src/components/use_speaking';
 
 import {getActiveSpeakerProfile} from './active_speaker';
 
@@ -46,6 +47,7 @@ interface SpeakerAvatarProps {
 }
 
 export function SpeakerAvatar(props: SpeakerAvatarProps) {
-    const activeSpeakerProfile = getActiveSpeakerProfile(props.sessions, props.profiles);
+    const localSpeaking = useLocalSpeaking();
+    const activeSpeakerProfile = getActiveSpeakerProfile(props.sessions, props.profiles, localSpeaking);
     return <ParticipantAvatar profile={activeSpeakerProfile}/>;
 }

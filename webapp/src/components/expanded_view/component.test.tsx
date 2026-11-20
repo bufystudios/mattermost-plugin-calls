@@ -4,7 +4,7 @@
 import type {UserSessionState} from '@mattermost/calls-common/lib/types';
 import type {Channel} from '@mattermost/types/channels';
 import type {UserProfile} from '@mattermost/types/users';
-import {render, screen, within} from '@testing-library/react';
+import {fireEvent, render, screen, within} from '@testing-library/react';
 import React from 'react';
 import {createIntl, RawIntlProvider} from 'react-intl';
 import {Provider} from 'react-redux';
@@ -41,7 +41,16 @@ jest.mock('src/components/dot_menu/dot_menu', () => ({
 
 // Each tile has its own tests; the grid only has to say it took over the body.
 jest.mock('./participants_grid', () => ({
-    ParticipantsGrid: () => <div data-testid={'calls-popout-participants-grid'}/>,
+    ParticipantsGrid: ({liveStream}: {liveStream?: {onWatch: () => void}}) => (
+        <div data-testid={'calls-popout-participants-grid'}>
+            {liveStream && (
+                <button
+                    data-testid={'grid-watch-stream'}
+                    onClick={liveStream.onWatch}
+                />
+            )}
+        </div>
+    ),
 }));
 
 const intl = createIntl({locale: 'en', messages: {}});
@@ -144,6 +153,7 @@ describe('ExpandedView', () => {
             channelID: dmChannelID,
             getSessionID: () => 'session-1',
             getRemoteVoiceTracks: () => [],
+            getSpeakingSessions: () => [],
             getRemoteScreenStream: () => null,
             getLocalScreenStream: () => null,
             on: jest.fn(),
@@ -189,5 +199,77 @@ describe('ExpandedView', () => {
         renderExpandedView([stubSession('session-1', 'user-id', true), stubSession('session-2', calleeID)]);
 
         expect(screen.queryByTestId('calls-popout-video-profile-ringing')).not.toBeInTheDocument();
+    });
+
+    describe('screen share click-to-watch', () => {
+        const mine = () => stubSession('session-1', 'user-id');
+        const theirs = () => stubSession('session-2', calleeID);
+
+        test('a viewer does not get the stream opened, only a LIVE tile in the grid', () => {
+            const {container} = renderExpandedView([mine(), theirs()], {screenSharingSession: theirs()});
+
+            expect(container.querySelector('#screen-player')).not.toBeInTheDocument();
+            expect(screen.getByTestId('grid-watch-stream')).toBeInTheDocument();
+        });
+
+        test('clicking Watch opens the stream, with a way to stop watching', () => {
+            const {container} = renderExpandedView([mine(), theirs()], {screenSharingSession: theirs()});
+
+            fireEvent.click(screen.getByTestId('grid-watch-stream'));
+
+            expect(container.querySelector('#screen-player')).toBeInTheDocument();
+            expect(screen.queryByTestId('grid-watch-stream')).not.toBeInTheDocument();
+
+            fireEvent.click(screen.getByTestId('stop-watching-button'));
+
+            expect(container.querySelector('#screen-player')).not.toBeInTheDocument();
+            expect(screen.getByTestId('grid-watch-stream')).toBeInTheDocument();
+        });
+
+        test('with cameras on the viewer gets a LIVE card above the videos instead of the stream', () => {
+            const {container} = renderExpandedView([stubSession('session-1', 'user-id', true), theirs()], {screenSharingSession: theirs()});
+
+            expect(screen.getByTestId('live-stream-card')).toBeInTheDocument();
+            expect(container.querySelector('#screen-player')).not.toBeInTheDocument();
+
+            fireEvent.click(screen.getByTestId('watch-stream-button'));
+
+            expect(container.querySelector('#screen-player')).toBeInTheDocument();
+            expect(screen.queryByTestId('live-stream-card')).not.toBeInTheDocument();
+        });
+
+        test('the sharer sees their own preview right away, without a Watch step', () => {
+            const {container} = renderExpandedView([mine(), theirs()], {screenSharingSession: mine()});
+
+            expect(container.querySelector('#screen-player')).toBeInTheDocument();
+            expect(screen.queryByTestId('grid-watch-stream')).not.toBeInTheDocument();
+        });
+
+        test('a new share starts as a LIVE card again after the previous one ended', () => {
+            const {container, rerender} = renderExpandedView([mine(), theirs()], {screenSharingSession: theirs()});
+            fireEvent.click(screen.getByTestId('grid-watch-stream'));
+            expect(container.querySelector('#screen-player')).toBeInTheDocument();
+
+            const rerenderWith = (sharing?: UserSessionState) => rerender(
+                <Provider store={mockStore(dmState([mine(), theirs()]))}>
+                    <RawIntlProvider value={intl}>
+                        <ExpandedView
+                            {...props}
+                            sessions={[mine(), theirs()]}
+                            currentSession={mine()}
+                            otherSessions={[theirs()]}
+                            isDMCalling={false}
+                            screenSharingSession={sharing}
+                        />
+                    </RawIntlProvider>
+                </Provider>,
+            );
+
+            rerenderWith(undefined);
+            rerenderWith(theirs());
+
+            expect(container.querySelector('#screen-player')).not.toBeInTheDocument();
+            expect(screen.getByTestId('grid-watch-stream')).toBeInTheDocument();
+        });
     });
 });

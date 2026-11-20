@@ -312,3 +312,50 @@ describe('ParticipantCell', () => {
         expect(onRemove).toHaveBeenCalled();
     });
 });
+
+describe('ParticipantCell (DM call UX)', () => {
+    test('should ring the avatar in the shared speaking green while the participant speaks', () => {
+        renderCell({isSpeaking: true});
+
+        expect(getComputedStyle(screen.getByAltText(/profile image/)).boxShadow).toBe('0px 0px 0px 3px #3DB887');
+    });
+
+    test('should not ring a quiet participant', () => {
+        renderCell({isSpeaking: false});
+
+        expect(getComputedStyle(screen.getByAltText(/profile image/)).boxShadow).toBe('none');
+    });
+
+    test('should badge a participant who is sharing their screen', () => {
+        renderCell({isSharingScreen: true});
+
+        expect(screen.getByTestId('live-badge')).toBeInTheDocument();
+    });
+
+    test('should show no badge for a participant who is not sharing', () => {
+        renderCell();
+
+        expect(screen.queryByTestId('live-badge')).not.toBeInTheDocument();
+    });
+
+    test('should offer a volume button only when asked to (remote participants)', () => {
+        renderCell({showVolume: true});
+        expect(screen.getByTestId('user-volume-button')).toBeInTheDocument();
+    });
+
+    test('should not offer a volume button by default (yourself, recorder)', () => {
+        renderCell();
+        expect(screen.queryByTestId('user-volume-button')).not.toBeInTheDocument();
+    });
+
+    test('should report a click on the tile for enlarging, and not when the volume button is used', () => {
+        const onFocusToggle = jest.fn();
+        renderCell({onFocusToggle, showVolume: true});
+
+        fireEvent.click(screen.getByTestId('user-volume-button'));
+        expect(onFocusToggle).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByTestId('participant-cell-focusable'));
+        expect(onFocusToggle).toHaveBeenCalledTimes(1);
+    });
+});

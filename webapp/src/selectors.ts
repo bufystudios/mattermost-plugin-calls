@@ -38,6 +38,7 @@ import {
     sessionsState,
     usersReactionsState,
 } from 'src/reducers';
+import {isSessionSpeaking, type LocalSpeakingState} from 'src/speaking';
 import {
     CallJobReduxState,
     CallsUserPreferences,
@@ -182,6 +183,17 @@ export const currentChannelHasCall: (state: GlobalState) => boolean =
         getCurrentChannelId,
         (callsStates, currChannelId) => Boolean(callsStates[currChannelId]),
     );
+
+// Sessions the client measured as speaking itself (P2P calls). See src/speaking.ts.
+export const localSpeakingSessions = (state: GlobalState): LocalSpeakingState =>
+    pluginState(state).localSpeaking || emptyLocalSpeaking;
+
+const emptyLocalSpeaking: LocalSpeakingState = {};
+
+// The one place that answers "is this participant speaking?": the server's voice
+// activity detection in SFU calls, the client's own level measurement in P2P calls.
+export const isSessionSpeakingSelector = (state: GlobalState, session?: UserSessionState): boolean =>
+    isSessionSpeaking(session, localSpeakingSessions(state));
 
 export const sessionsInCurrentCall: (state: GlobalState) => UserSessionState[] =
     createSelector(

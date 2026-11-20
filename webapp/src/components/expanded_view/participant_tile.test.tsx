@@ -19,6 +19,14 @@ jest.mock('src/components/dot_menu/dot_menu', () => ({
     DropdownMenu: 'div',
 }));
 
+// The speaking state itself (server voice activity or local levels) is covered by the speaking tests;
+// here it only has to follow the session.
+jest.mock('src/components/use_speaking', () => ({
+    __esModule: true,
+    default: () => null,
+    useIsSessionSpeaking: (session?: {voice?: boolean}) => Boolean(session?.voice),
+}));
+
 const mockCell = jest.fn();
 
 // The tile's whole job is turning a session and a profile map into cell props, so the cell stands in

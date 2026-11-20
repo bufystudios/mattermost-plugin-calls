@@ -11,6 +11,7 @@ import styled from 'styled-components';
 import {TileSize} from './participant_cell';
 import {ParticipantTile} from './participant_tile';
 import {ParticipantTileLoading} from './participant_tile_loading';
+import {StreamTile} from './stream_tile';
 
 type Props = {
     callID: string,
@@ -21,11 +22,20 @@ type Props = {
     sessions: UserSessionState[],
     onParticipantRemove?: (sessionID: string, userID: string) => void,
 
+    // A screen share the viewer has not opened yet. Shown as a LIVE card among the tiles.
+    liveStream?: {
+        sessionID: string,
+        profile?: UserProfile,
+        onWatch: () => void,
+    },
+
     // Used by the recorder client.
     profileImages?: Record<string, string>,
 };
 
-const tileSizesMap = {
+const STREAM_FOCUS_ID = 'live-stream';
+
+const tileSizesMap: {[size: number]: {width: number, height: number}} = {
     [TileSize.Small]: {
         width: 96,
         height: 164,
@@ -52,12 +62,35 @@ export function ParticipantsGrid({
     profiles,
     sessions,
     onParticipantRemove,
+    liveStream,
     profileImages,
 }: Props) {
     const {isDM, isDMCalling, dmCalleeID, dmCallee} = useDMCallingState();
 
-    // The ringing placeholder occupies a tile, so sizing has to account for it
-    const tileCount = sessions.length + (isDMCalling ? 1 : 0);
+    // The ringing placeholder and the stream card occupy a tile, so sizing has to account for them
+    const tileCount = sessions.length + (isDMCalling ? 1 : 0) + (liveStream ? 1 : 0);
+
+    // Clicking a tile enlarges it (session id, or STREAM_FOCUS_ID for the stream card). The
+    // recorder view is a static picture, it has no focus.
+    const focusEnabled = !profileImages;
+    const [focusedID, setFocusedID] = useState<string | null>(null);
+    const toggleFocus = (id: string) => setFocusedID((cur) => (cur === id ? null : id));
+    const focusExists = focusedID !== null && (focusedID === STREAM_FOCUS_ID ? Boolean(liveStream) : sessions.some((s) => s.session_id === focusedID));
+    const focused = focusEnabled && focusExists ? focusedID : null;
+
+    useEffect(() => {
+        if (!focused) {
+            // eslint-disable-next-line no-undefined
+            return undefined;
+        }
+        const onKey = (ev: KeyboardEvent) => {
+            if (ev.key === 'Escape') {
+                setFocusedID(null);
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [focused]);
 
     const ref = useRef<HTMLDivElement>(null);
 
@@ -140,6 +173,62 @@ export function ParticipantsGrid({
         setPaddingV(res.paddingV);
     }, [tileCount, resize]);
 
+    const renderTile = (session: UserSessionState, size: TileSize) => (
+        <ParticipantTile
+            key={session.session_id}
+            session={session}
+            profiles={profiles}
+            tileSize={size}
+            profileImages={profileImages}
+            currentSessionID={currentSessionID}
+            currentUserID={currentUserID}
+            callHostID={callHostID}
+            callID={callID}
+            showHostBadge={!isDM}
+            onParticipantRemove={onParticipantRemove}
+            isSharingScreen={liveStream?.sessionID === session.session_id}
+            focused={focused === session.session_id}
+            onFocusToggle={focusEnabled ? toggleFocus : undefined}
+        />
+    );
+
+    const renderStreamTile = (size: TileSize) => liveStream && (
+        <StreamTile
+            key={STREAM_FOCUS_ID}
+            profile={liveStream.profile}
+            tileSize={size}
+            focused={focused === STREAM_FOCUS_ID}
+            onFocusToggle={focusEnabled ? () => toggleFocus(STREAM_FOCUS_ID) : undefined}
+            onWatch={liveStream.onWatch}
+        />
+    );
+
+    if (focused) {
+        const focusedSession = sessions.find((s) => s.session_id === focused);
+        const others = sessions.filter((s) => s.session_id !== focused);
+
+        return (
+            <ParticipantsGridContainer
+                ref={ref}
+                $paddingV={0}
+                $paddingH={0}
+            >
+                <FocusedLayout
+                    id='calls-expanded-view-participants-grid'
+                    data-testid='calls-expanded-view-focused-layout'
+                >
+                    <FocusedStage>
+                        {focusedSession ? renderTile(focusedSession, TileSize.Focused) : renderStreamTile(TileSize.Focused)}
+                    </FocusedStage>
+                    <Filmstrip>
+                        {focusedSession && renderStreamTile(TileSize.Small)}
+                        {others.map((session) => renderTile(session, TileSize.Small))}
+                    </Filmstrip>
+                </FocusedLayout>
+            </ParticipantsGridContainer>
+        );
+    }
+
     return (
         <ParticipantsGridContainer
             ref={ref}
@@ -149,21 +238,9 @@ export function ParticipantsGrid({
             <ParticipantsList
                 id='calls-expanded-view-participants-grid'
             >
-                {sessions.map((session) => (
-                    <ParticipantTile
-                        key={session.session_id}
-                        session={session}
-                        profiles={profiles}
-                        tileSize={tileSize}
-                        profileImages={profileImages}
-                        currentSessionID={currentSessionID}
-                        currentUserID={currentUserID}
-                        callHostID={callHostID}
-                        callID={callID}
-                        showHostBadge={!isDM}
-                        onParticipantRemove={onParticipantRemove}
-                    />
-                ))}
+                {sessions.map((session) => renderTile(session, tileSize))}
+
+                {renderStreamTile(tileSize)}
 
                 {/* While a DM call is still ringing the grid shows a placeholder
                 tile for the callee, next to the caller's own. */}
@@ -178,6 +255,34 @@ export function ParticipantsGrid({
         </ParticipantsGridContainer>
     );
 }
+
+const FocusedLayout = styled.div`
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+`;
+
+const FocusedStage = styled.ul`
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  min-height: 0;
+`;
+
+const Filmstrip = styled.ul`
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+`;
 
 const ParticipantsList = styled.ul`
   display: flex;

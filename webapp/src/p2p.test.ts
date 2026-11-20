@@ -542,7 +542,11 @@ describe('P2PController', () => {
             await flush();
             pcs[0].setConnectionState('connected');
 
-            expect(remoteTracks).toEqual([{type: 'voice', track: voice}, {type: 'screen', track: screen}]);
+            // Each track says which session (the peer) it came from, for per-user volume.
+            expect(remoteTracks).toEqual([
+                {type: 'voice', track: voice, sessionID: 'b'},
+                {type: 'screen', track: screen, sessionID: 'b'},
+            ]);
         });
 
         it('does not emit remote tracks of a connection that was abandoned', async () => {

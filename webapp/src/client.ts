@@ -23,6 +23,8 @@ import {
 } from 'src/constants';
 import {type BgBlurData, getBgBlurData} from 'src/local_storage';
 import Segmenter from 'src/segmenter';
+import {SpeakingMonitor} from 'src/speaking';
+import {getNoiseSuppression} from 'src/voice_input_prefs';
 
 export const AudioInputPermissionsError = new Error('missing audio input permissions');
 export const AudioInputMissingError = new Error('no audio input available');
@@ -88,7 +90,6 @@ export default class CallsClient extends EventEmitter {
     public initTime = Date.now();
     private rtcMonitor: RTCMonitor | null = null;
     private av1Codec: RTCRtpCodecCapability | null = null;
-    private defaultAudioTrackOptions: MediaTrackConstraints;
     private defaultVideoTrackOptions: MediaTrackConstraints;
     private defaultVideoTrackEncodings: RTPEncodingParameters[];
     private segmenter: Segmenter | null = null;
@@ -113,6 +114,16 @@ export default class CallsClient extends EventEmitter {
     // Remote tracks received through the P2P connection.
     private p2pRemoteTracks = new Set<MediaStreamTrack>();
 
+    // Which session sent a remote track (track id -> sender session id). Needed for per-user
+    // volume. The SFU reports it in the media map (`sender_id`), a P2P track belongs to the peer.
+    private remoteTrackSessions = new Map<string, string>();
+
+    // Measures audio levels while the media goes peer to peer (the SFU, and so its voice
+    // activity detection, gets no audio then). Emits 'speaking' {sessionID, speaking}.
+    private speakingMonitor: SpeakingMonitor | null = null;
+    private ownSessionID = '';
+    private p2pRemoteVoiceTracks = new Map<string, MediaStreamTrack>();
+
     constructor(config: CallsClientConfig) {
         logDebug('creating new calls client', JSON.stringify(config));
         super();
@@ -133,11 +144,6 @@ export default class CallsClient extends EventEmitter {
         this.videoDevices = [];
         this.channelID = '';
         this.config = config;
-        this.defaultAudioTrackOptions = {
-            autoGainControl: true,
-            echoCancellation: true,
-            noiseSuppression: true,
-        };
         this.defaultVideoTrackOptions = DefaultVideoTrackOptions;
         this.defaultVideoTrackEncodings = [
             {maxBitrate: 1000 * 1000, maxFramerate: 30, scaleResolutionDownBy: 1.0},
@@ -150,6 +156,31 @@ export default class CallsClient extends EventEmitter {
             this.disconnect();
         };
         window.addEventListener('beforeunload', this.onBeforeUnload);
+    }
+
+    // Noise suppression is a user pref (Calls settings), read every time a track is
+    // requested so a change applies on the next unmute/device change at the latest.
+    private get defaultAudioTrackOptions(): MediaTrackConstraints {
+        return {
+            autoGainControl: true,
+            echoCancellation: true,
+            noiseSuppression: getNoiseSuppression(),
+        };
+    }
+
+    // Applies the noise suppression pref to the live microphone track. Works on the fly in
+    // Chromium/Electron (no renegotiation: it is the same track). If the browser refuses,
+    // the new value is picked up the next time the track is created (unmute/device change).
+    public async applyNoiseSuppression() {
+        const track = this.audioTrack;
+        if (!track || track.readyState !== 'live') {
+            return;
+        }
+        try {
+            await track.applyConstraints({noiseSuppression: getNoiseSuppression()});
+        } catch (err) {
+            logWarn('failed to apply noise suppression on the live track', err);
+        }
     }
 
     private async updateDevices() {
@@ -189,7 +220,7 @@ export default class CallsClient extends EventEmitter {
     private async handleAudioDeviceFallback(deviceType: string) {
         const currentDevice = deviceType === 'input' ? this.currentAudioInputDevice : this.currentAudioOutputDevice;
         const devices = deviceType === 'input' ? this.audioDevices.inputs : this.audioDevices.outputs;
-        const missingCurrentDevice = !devices.some(device => currentDevice?.deviceId === device.deviceId);
+        const missingCurrentDevice = !devices.some((device) => currentDevice?.deviceId === device.deviceId);
 
         // Fallback to the system default device if the current one is not available.
         if (missingCurrentDevice && devices.length > 0) {
@@ -655,7 +686,8 @@ export default class CallsClient extends EventEmitter {
             return;
         }
 
-        const p2p = new P2PController(ws.getOriginalConnID(), {
+        this.ownSessionID = ws.getOriginalConnID();
+        const p2p = new P2PController(this.ownSessionID, {
             iceServers: this.config.iceServers || [],
             enableAV1: this.config.enableAV1,
             encodings: {
@@ -673,8 +705,9 @@ export default class CallsClient extends EventEmitter {
         this.p2p = p2p;
 
         p2p.on('statechange', (state: P2PState, prev: P2PState) => this.onP2PStateChange(state, prev));
-        p2p.on('remotetrack', ({type, track}: {type: P2PTrackType; track: MediaStreamTrack}) => {
-            this.onRemoteStream(new MediaStream([track]), {type}, 'p2p');
+        p2p.on('remotetrack', ({type, track, sessionID}: {type: P2PTrackType; track: MediaStreamTrack; sessionID?: string}) => {
+            // Same shape as the SFU media map entry so both origins map the track to its sender.
+            this.onRemoteStream(new MediaStream([track]), {type, sender_id: sessionID}, 'p2p');
         });
 
         this.syncP2PMedia();
@@ -713,8 +746,10 @@ export default class CallsClient extends EventEmitter {
         if (state === 'p2p' && prev !== 'p2p') {
             this.p2pActive = true;
             this.suspendSFUMedia();
+            this.refreshSpeakingMonitor();
         } else if (state !== 'p2p' && prev === 'p2p') {
             this.p2pActive = false;
+            this.stopSpeakingMonitor();
             this.restoreRemoteTracksFromSFU();
             this.resumeSFUMedia().catch((err) => logErr('failed to resume sending media over the SFU', err));
         }
@@ -820,11 +855,47 @@ export default class CallsClient extends EventEmitter {
             }
         }
 
+        this.p2pRemoteTracks.forEach((track) => this.remoteTrackSessions.delete(track.id));
         this.p2pRemoteTracks.clear();
     }
 
+    // P2P only: starts/updates the local audio level monitoring of our mic and of the peer's voice.
+    // In SFU mode the server's voice activity detection is used and this stays off.
+    private refreshSpeakingMonitor() {
+        if (!this.p2pActive) {
+            return;
+        }
+        const selfSessionID = this.ownSessionID;
+        const tracks: {[sessionID: string]: MediaStreamTrack | null} = {};
+        if (selfSessionID) {
+            tracks[selfSessionID] = this.audioTrack;
+        }
+        this.p2pRemoteVoiceTracks.forEach((track, sessionID) => {
+            tracks[sessionID] = track;
+        });
+
+        if (!this.speakingMonitor) {
+            this.speakingMonitor = new SpeakingMonitor((sessionID, speaking) => {
+                this.emit('speaking', {sessionID, speaking});
+            }, {attachSink: true});
+        }
+        this.speakingMonitor.setTracks(tracks);
+    }
+
+    private stopSpeakingMonitor() {
+        // Stopping reports everyone as not speaking, so the UI falls back to the server's state.
+        this.speakingMonitor?.stop();
+        this.speakingMonitor = null;
+        this.p2pRemoteVoiceTracks.clear();
+    }
+
+    // Sessions currently reported as speaking by the local monitor (P2P calls).
+    public getSpeakingSessions(): string[] {
+        return this.speakingMonitor?.getSpeakingSessions() ?? [];
+    }
+
     // Handles a remote track coming from either the SFU or the P2P connection.
-    private onRemoteStream(remoteStream: MediaStream, trackInfo: {type?: P2PTrackType | string} | undefined, origin: 'sfu' | 'p2p') {
+    private onRemoteStream(remoteStream: MediaStream, trackInfo: {type?: P2PTrackType | string; sender_id?: string} | undefined, origin: 'sfu' | 'p2p') {
         logDebug('new remote stream received', origin, remoteStream.id, 'trackInfo:', trackInfo);
         for (const track of remoteStream.getTracks()) {
             logDebug('remote track', track.kind, track.id, 'label:', track.label);
@@ -838,6 +909,11 @@ export default class CallsClient extends EventEmitter {
         const audioTracks = remoteStream.getAudioTracks();
         const videoTracks = remoteStream.getVideoTracks();
 
+        const senderSessionID = trackInfo?.sender_id;
+        if (senderSessionID) {
+            remoteStream.getTracks().forEach((track) => this.remoteTrackSessions.set(track.id, senderSessionID));
+        }
+
         logDebug('stream has', audioTracks.length, 'audio tracks and', videoTracks.length, 'video tracks');
 
         // Handle audio tracks based on type
@@ -845,13 +921,17 @@ export default class CallsClient extends EventEmitter {
             if (trackInfo?.type === 'screen-audio') {
                 // Screen share audio - emit as voice stream so it gets played
                 logDebug('received screen-audio track, emitting as remoteVoiceStream');
-                this.emit('remoteVoiceStream', new MediaStream(audioTracks));
+                this.emit('remoteVoiceStream', new MediaStream(audioTracks), senderSessionID);
                 this.remoteVoiceTracks.push(...audioTracks);
             } else if (trackInfo?.type === 'voice' || !trackInfo?.type) {
                 // Regular voice audio
                 logDebug('received voice track, emitting as remoteVoiceStream');
-                this.emit('remoteVoiceStream', remoteStream);
+                this.emit('remoteVoiceStream', remoteStream, senderSessionID);
                 this.remoteVoiceTracks.push(...audioTracks);
+                if (origin === 'p2p' && senderSessionID) {
+                    this.p2pRemoteVoiceTracks.set(senderSessionID, audioTracks[0]);
+                    this.refreshSpeakingMonitor();
+                }
             } else {
                 logDebug('unexpected audio track type:', trackInfo?.type);
             }
@@ -881,6 +961,7 @@ export default class CallsClient extends EventEmitter {
         this.removeAllListeners('connect');
         this.removeAllListeners('remoteVoiceStream');
         this.removeAllListeners('remoteScreenStream');
+        this.removeAllListeners('speaking');
         this.removeAllListeners('localScreenStream');
         this.removeAllListeners('localVideoStream');
         this.removeAllListeners('devicechange');
@@ -956,6 +1037,7 @@ export default class CallsClient extends EventEmitter {
             }
             this.audioTrack = newTrack;
             this.syncP2PMedia();
+            this.refreshSpeakingMonitor();
         } catch (err) {
             logErr('setAudioInputDevice: failed to switch audio input device', device.deviceId, err);
             throw err;
@@ -1071,6 +1153,7 @@ export default class CallsClient extends EventEmitter {
         this.p2p?.destroy();
         this.p2p = null;
         this.p2pActive = false;
+        this.stopSpeakingMonitor();
         if (this.peer) {
             this.getStats().then((stats) => {
                 // Flush logs with stats to accumulated buffer
@@ -1165,6 +1248,7 @@ export default class CallsClient extends EventEmitter {
             }
             this.audioTrack.enabled = true;
             this.syncP2PMedia();
+            this.refreshSpeakingMonitor();
         }
 
         this.emit('unmute');
@@ -1193,6 +1277,11 @@ export default class CallsClient extends EventEmitter {
             return null;
         }
         return new MediaStream([this.remoteVideoTracks[this.remoteVideoTracks.length - 1]]);
+    }
+
+    // Session that sent a remote track (voice, screen audio, ...), if known.
+    public getRemoteTrackSessionID(trackID: string): string | undefined {
+        return this.remoteTrackSessions.get(trackID);
     }
 
     public getRemoteVoiceTracks(): MediaStreamTrack[] {

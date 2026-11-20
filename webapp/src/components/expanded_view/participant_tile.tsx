@@ -7,6 +7,7 @@ import {IDMappedObjects} from '@mattermost/types/utilities';
 import {Client4} from 'mattermost-redux/client';
 import React from 'react';
 import {useIntl} from 'react-intl';
+import {useIsSessionSpeaking} from 'src/components/use_speaking';
 import {getUserDisplayName} from 'src/utils';
 
 import ParticipantCell, {TileSize} from './participant_cell';
@@ -22,17 +23,20 @@ interface Props {
     callID: string;
     showHostBadge?: boolean;
     onParticipantRemove?: (sessionID: string, userID: string) => void,
+    isSharingScreen?: boolean,
+    focused?: boolean,
+    onFocusToggle?: (sessionID: string) => void,
 }
 
 export function ParticipantTile(props: Props) {
     const {formatMessage} = useIntl();
+    const isSpeaking = useIsSessionSpeaking(props.session);
 
     if (!props.profiles) {
         return null;
     }
 
     const isMuted = !props.session.unmuted;
-    const isSpeaking = Boolean(props.session.voice);
     const isHandRaised = Boolean(props.session.raised_hand > 0);
     const reaction = props.session?.reaction;
     const profile = props.profiles[props.session.user_id];
@@ -73,8 +77,11 @@ export function ParticipantTile(props: Props) {
             callID={props.callID}
             userID={props.session.user_id}
             sessionID={props.session.session_id}
-            isSharingScreen={false}
+            isSharingScreen={Boolean(props.isSharingScreen)}
             onRemove={handleHostRemoveParticipant}
+            focused={props.focused}
+            onFocusToggle={props.onFocusToggle ? () => props.onFocusToggle?.(props.session.session_id) : undefined}
+            showVolume={!isYou && !props.profileImages}
         />
     );
 }

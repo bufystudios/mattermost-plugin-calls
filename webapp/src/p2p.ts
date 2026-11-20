@@ -116,7 +116,7 @@ export class P2PController extends EventEmitter {
     private pc: RTCPeerConnection | null = null;
     private mediaMap: MediaMap = {};
     private transceivers: Partial<Record<P2PTrackType, RTCRtpTransceiver>> = {};
-    private remoteTracks: Array<{type: P2PTrackType; track: MediaStreamTrack}> = [];
+    private remoteTracks: Array<{type: P2PTrackType; track: MediaStreamTrack; sessionID?: string}> = [];
     private pendingCandidates: RTCIceCandidateInit[] = [];
     private pendingSignals: Array<{signal: P2PSignal; at: number}> = [];
     private signalQueue: Promise<void> = Promise.resolve();
@@ -265,9 +265,9 @@ export class P2PController extends EventEmitter {
                 return;
             }
             logDebug('p2p: remote track', type, ev.track.id);
-            this.remoteTracks.push({type, track: ev.track});
+            this.remoteTracks.push({type, track: ev.track, sessionID: this.peerSessionID ?? undefined});
             if (this.state === 'p2p') {
-                this.emit('remotetrack', {type, track: ev.track});
+                this.emit('remotetrack', {type, track: ev.track, sessionID: this.peerSessionID ?? undefined});
             }
         };
     }

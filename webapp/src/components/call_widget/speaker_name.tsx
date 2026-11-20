@@ -6,6 +6,7 @@ import {UserProfile} from '@mattermost/types/users';
 import {IDMappedObjects} from '@mattermost/types/utilities';
 import React from 'react';
 import {useIntl} from 'react-intl';
+import {useLocalSpeaking} from 'src/components/use_speaking';
 import {getUserDisplayName, untranslatable} from 'src/utils';
 
 import {getActiveSpeakerProfile} from './active_speaker';
@@ -48,7 +49,8 @@ interface SpeakerNameProps {
 }
 
 export function SpeakerName(props: SpeakerNameProps) {
-    const activeSpeakerProfile = getActiveSpeakerProfile(props.sessions, props.profiles);
+    const localSpeaking = useLocalSpeaking();
+    const activeSpeakerProfile = getActiveSpeakerProfile(props.sessions, props.profiles, localSpeaking);
     return (
         <ParticipantName
             profile={activeSpeakerProfile}

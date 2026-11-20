@@ -24,4 +24,24 @@ li.participantCell {
         overflow-wrap: break-word;
         width: 100%;
     }
+
+    &[data-focused] {
+        cursor: pointer;
+    }
+
+    &[data-focused='true'] {
+        border-radius: 8px;
+        background: rgba(var(--sidebar-text-rgb), 0.08);
+    }
+
+    // Local volume button: only visible while the tile is hovered or has keyboard focus inside.
+    .tileVolume {
+        opacity: 0;
+        transition: opacity 0.1s;
+    }
+
+    &:hover .tileVolume,
+    &:focus-within .tileVolume {
+        opacity: 1;
+    }
 }

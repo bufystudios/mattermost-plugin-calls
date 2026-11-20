@@ -5,6 +5,7 @@
 import {CallJobState, CallsConfig, CallsVersionInfo, LiveCaption, Reaction, UserSessionState} from '@mattermost/calls-common/lib/types';
 import {combineReducers} from 'redux';
 import {MAX_NUM_REACTIONS_IN_REACTION_STREAM} from 'src/constants';
+import type {LocalSpeakingState} from 'src/speaking';
 import {
     CallsConfigDefault,
     CallsUserPreferences,
@@ -40,6 +41,7 @@ import {
     LIVE_CAPTION_TIMEOUT_EVENT,
     LIVE_CAPTIONS_ENABLED,
     LOCAL_SESSION_CLOSE,
+    LOCAL_SPEAKING,
     RECEIVED_CALLS_CONFIG,
     RECEIVED_CALLS_CONFIG_ENV_OVERRIDES,
     RECEIVED_CALLS_USER_PREFERENCES,
@@ -1061,6 +1063,32 @@ const clientConnecting = (state = false, action: { type: string, data: boolean }
     }
 };
 
+// Sessions the client itself measured as speaking (see src/speaking.ts). Empty in SFU
+// calls, where `session.voice` from the server is used.
+export type localSpeakingState = LocalSpeakingState;
+
+const localSpeaking = (state: localSpeakingState = {}, action: { type: string, data: { sessionID: string, speaking: boolean } }) => {
+    switch (action.type) {
+    case UNINIT:
+    case LOCAL_SESSION_CLOSE:
+        return {};
+    case LOCAL_SPEAKING: {
+        const {sessionID, speaking} = action.data;
+        if (speaking) {
+            return state[sessionID] ? state : {...state, [sessionID]: true};
+        }
+        if (!state[sessionID]) {
+            return state;
+        }
+        const next = {...state};
+        delete next[sessionID];
+        return next;
+    }
+    default:
+        return state;
+    }
+};
+
 type hostControlNoticeAction = {
     type: string;
     data: HostControlNotice;
@@ -1136,4 +1164,5 @@ export default combineReducers({
     liveCaptions,
     clientConnecting,
     hostControlNotices,
+    localSpeaking,
 });

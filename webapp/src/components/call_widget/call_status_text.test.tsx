@@ -16,6 +16,7 @@ import {CallStatusText} from './call_status_text';
 
 jest.mock('src/selectors', () => ({
     channelForCurrentCall: jest.fn(),
+    localSpeakingSessions: () => ({}),
 }));
 
 jest.mock('src/components/use_dm_calling_state', () => ({

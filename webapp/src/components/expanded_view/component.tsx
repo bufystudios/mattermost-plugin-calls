@@ -21,6 +21,7 @@ import {IntlShape} from 'react-intl';
 import {RouteComponentProps} from 'react-router-dom';
 import {hostMuteOthers, hostRemove} from 'src/actions';
 import Avatar from 'src/components/avatar/avatar';
+import {SPEAKING_RING_COLOR, speakingRing} from 'src/components/avatar/speaking_ring';
 import {Badge} from 'src/components/badge';
 import {CallStatusTimer} from 'src/components/call_status_timer';
 import DotMenu, {DotMenuButton, DropdownMenu} from 'src/components/dot_menu/dot_menu';
@@ -48,9 +49,15 @@ import VideoOffIcon from 'src/components/icons/video_off';
 import VideoOnIcon from 'src/components/icons/video_on';
 import {ExpandedIncomingCallContainer} from 'src/components/incoming_calls/expanded_incoming_call_container';
 import {LeaveCallMenu} from 'src/components/leave_call_menu';
+import LiveBadge from 'src/components/live_badge';
 import {ReactionStream} from 'src/components/reaction_stream/reaction_stream';
+import {LiveStreamCard, StreamActions} from 'src/components/stream_watch';
+import SpeakingSync from 'src/components/use_speaking';
+import {UserVolumeButton} from 'src/components/user_volume_control';
 import {CallAlertConfigs, DEGRADED_CALL_QUALITY_ALERT_WAIT, STORAGE_CALLS_MIRROR_VIDEO_KEY} from 'src/constants';
 import {logDebug, logErr} from 'src/log';
+import {isPushToTalkActive} from 'src/push_to_talk';
+import {reconcileWatch, startWatching, streamView, type WatchState} from 'src/screen_watch';
 import {
     keyToAction,
     LEAVE_CALL,
@@ -63,6 +70,7 @@ import {
     reverseKeyMappings,
     SHARE_UNSHARE_SCREEN,
 } from 'src/shortcuts';
+import {isSessionSpeaking, type LocalSpeakingState} from 'src/speaking';
 import {ModalData} from 'src/types/mattermost-webapp';
 import {
     CallAlertStates,
@@ -82,6 +90,7 @@ import {
     untranslatable,
 } from 'src/utils';
 import {serverDismissedAt} from 'src/utils/clock_skew';
+import {getPushToTalkConfig, keyCodeLabel} from 'src/voice_input_prefs';
 import styled, {createGlobalStyle, css} from 'styled-components';
 
 import {CallSettingsButton} from './call_settings';
@@ -134,6 +143,7 @@ interface Props extends RouteComponentProps {
     otherSessions: UserSessionState[];
     isDMCalling: boolean;
     clientConnecting: boolean;
+    localSpeaking: LocalSpeakingState;
 }
 
 interface State {
@@ -145,6 +155,22 @@ interface State {
     alerts: CallAlertStates,
     removeConfirmation: RemoveConfirmationData | null,
     viewState: 'grid' | 'speaker',
+
+    // Session of the share the user chose to watch (click-to-watch, see src/screen_watch.ts).
+    watchingScreen: WatchState,
+
+    // Session whose video card is enlarged in the speaker view (DM video calls).
+    focusedSessionID: string | null,
+}
+
+// The call widget (opener of the pop out) tells which share the user is already watching, so
+// "Pop out" lands on the stream instead of asking to click Watch a second time.
+function initialWatchedScreen(): WatchState {
+    try {
+        return window.opener?.callActions?.getWatchedScreenSession?.() ?? null;
+    } catch {
+        return null;
+    }
 }
 
 const StyledMediaController = styled(MediaController)`
@@ -299,6 +325,8 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
             alerts: CallAlertStatesDefault,
             removeConfirmation: null,
             viewState: 'speaker',
+            watchingScreen: reconcileWatch(initialWatchedScreen(), props.screenSharingSession?.session_id),
+            focusedSessionID: null,
         };
 
         if (window.opener) {
@@ -400,6 +428,11 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
 
         switch (keyToAction('popout', ev)) {
         case PUSH_TO_TALK:
+            // The configurable push-to-talk (src/push_to_talk.ts) replaces this built-in space bar
+            // one: only one of the two is ever active.
+            if (isPushToTalkActive()) {
+                return;
+            }
             if (this.pushToTalk) {
                 return;
             }
@@ -469,7 +502,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
     };
 
     onMuteToggle = () => {
-        if (this.pushToTalk) {
+        if (this.pushToTalk || isPushToTalkActive()) {
             return;
         }
         const callsClient = getCallsClient();
@@ -496,6 +529,56 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
     isMuted() {
         return this.props.currentSession ? !this.props.currentSession.unmuted : true;
     }
+
+    // Viewers get a LIVE card until they click it, the sharer sees their own preview.
+    streamViewState = () => streamView({
+        sharerSessionID: this.props.screenSharingSession?.session_id,
+        mySessionID: this.props.currentSession?.session_id,
+        watching: this.state.watchingScreen,
+    });
+
+    isShowingScreenPlayer = () => this.streamViewState() === 'player';
+
+    onWatchStream = () => {
+        this.setState({watchingScreen: startWatching(this.props.screenSharingSession?.session_id)});
+    };
+
+    onStopWatchingStream = () => {
+        this.setState({watchingScreen: null});
+    };
+
+    // Whether the user's own card is the enlarged one in the speaker view (DM: one other participant).
+    isSelfFocused = () => Boolean(this.state.focusedSessionID) &&
+        this.state.focusedSessionID === this.props.currentSession?.session_id &&
+        this.props.otherSessions.length > 0;
+
+    onFocusSession = (sessionID: string) => {
+        // Clicking the enlarged card again goes back to the default view.
+        this.setState({
+            viewState: 'speaker',
+            focusedSessionID: this.state.focusedSessionID === sessionID ? null : sessionID,
+        });
+    };
+
+    // The LIVE card in the video layouts. The participants grid shows it as a tile instead.
+    renderLiveCard = (compact: boolean) => {
+        const sharer = this.props.screenSharingSession;
+        const profile = sharer && this.props.profiles[sharer.user_id];
+        if (!profile) {
+            return null;
+        }
+
+        return (
+            <div style={{display: 'flex', justifyContent: 'center', padding: '0 20px 8px'}}>
+                <LiveStreamCard
+                    profile={profile}
+                    compact={compact}
+                    onDark={true}
+                    onWatch={this.onWatchStream}
+                />
+            </div>
+        );
+    };
 
     isVideoOn() {
         return this.props.currentSession ? this.props.currentSession.video : false;
@@ -617,6 +700,15 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
 
         if (this.screenPlayer && this.state.screenStream !== prevState.screenStream) {
             this.screenPlayer.srcObject = this.state.screenStream;
+        }
+
+        // Watching only lasts for the share that was clicked: a new share starts as a LIVE card.
+        if (prevProps.screenSharingSession?.session_id !== this.props.screenSharingSession?.session_id) {
+            const watching = reconcileWatch(this.state.watchingScreen, this.props.screenSharingSession?.session_id);
+            if (watching !== this.state.watchingScreen) {
+                // eslint-disable-next-line react/no-did-update-set-state
+                this.setState({watchingScreen: watching});
+            }
         }
     }
 
@@ -928,34 +1020,46 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
         const otherProfile = this.props.connectedDMUser;
         const otherSession = this.props.otherSessions[0];
 
+        // Next to the screen player both cards are shown. Otherwise this strip holds the card that is
+        // not enlarged below, and clicking it swaps the two.
+        const player = this.isShowingScreenPlayer();
+        const focusedIsSelf = this.isSelfFocused();
+        const showSelf = player || !focusedIsSelf;
+        const showOther = player || focusedIsSelf;
+        const swap = (session?: UserSessionState) => (!player && session ? () => this.onFocusSession(session.session_id) : undefined);
+
         return (
             <VideoProfilesTopContainer
                 className='calls-popout-top-video-container'
             >
-                { selfProfile && selfSession &&
+                { showSelf && selfProfile && selfSession &&
                     <div style={{width: '156px', height: '88px'}}>
                         <VideoProfile
+                            onClick={swap(selfSession)}
                             stream={this.state.selfVideoStream}
                             profile={selfProfile}
                             profileName={formatMessage({defaultMessage: '(you)'})}
                             isMuted={!selfSession.unmuted}
                             hasVideo={Boolean(selfSession.video)}
-                            isSpeaking={Boolean(selfSession.voice)}
+                            isSpeaking={isSessionSpeaking(selfSession, this.props.localSpeaking)}
                             mirrorVideo={localStorage.getItem(STORAGE_CALLS_MIRROR_VIDEO_KEY) === 'true'}
                             testID='calls-popout-video-profile-self'
                         />
                     </div>
                 }
 
-                {this.props.screenSharingSession && otherProfile && otherSession &&
+                {showOther && otherProfile && otherSession &&
                     <div style={{width: '156px', height: '88px'}}>
                         <VideoProfile
+                            onClick={swap(otherSession)}
                             stream={this.state.otherVideoStream}
                             profile={otherProfile}
                             profileName={getUserDisplayName(otherProfile)}
                             isMuted={!otherSession.unmuted}
                             hasVideo={Boolean(otherSession.video)}
-                            isSpeaking={Boolean(otherSession.voice)}
+                            isSpeaking={isSessionSpeaking(otherSession, this.props.localSpeaking)}
+                            isLive={this.props.screenSharingSession?.session_id === otherSession.session_id}
+                            volumeUserID={otherProfile.id}
                             mirrorVideo={false}
                         />
                     </div>
@@ -974,10 +1078,12 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
         const otherProfile = this.props.connectedDMUser;
         const otherSession = this.props.otherSessions[0];
 
-        // If current user is the only one in the call, we show their video, otherwise we show the other user's video.
-        const session = this.props.otherSessions.length === 0 ? selfSession : otherSession;
-        const profile = this.props.otherSessions.length === 0 ? selfProfile : otherProfile;
-        const stream = this.props.otherSessions.length === 0 ? this.state.selfVideoStream : this.state.otherVideoStream;
+        // If current user is the only one in the call, we show their video, otherwise we show the other user's
+        // video, unless the user enlarged their own card.
+        const showSelfBig = this.props.otherSessions.length === 0 || this.isSelfFocused();
+        const session = showSelfBig ? selfSession : otherSession;
+        const profile = showSelfBig ? selfProfile : otherProfile;
+        const stream = showSelfBig ? this.state.selfVideoStream : this.state.otherVideoStream;
         const mirrorSelfVideo = localStorage.getItem(STORAGE_CALLS_MIRROR_VIDEO_KEY) === 'true';
 
         const ringing = this.isRingingCallee();
@@ -1021,7 +1127,10 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                     profileName={session === selfSession ? `${getUserDisplayName(profile)} ${formatMessage({defaultMessage: '(you)'})}` : getUserDisplayName(profile)}
                     isMuted={!session.unmuted}
                     hasVideo={Boolean(session.video)}
-                    isSpeaking={Boolean(session.voice)}
+                    isSpeaking={isSessionSpeaking(session, this.props.localSpeaking)}
+                    isLive={this.props.screenSharingSession?.session_id === session.session_id}
+                    volumeUserID={session === otherSession ? profile.id : undefined}
+                    onClick={this.isShowingScreenPlayer() || !this.props.otherSessions.length ? undefined : () => this.onFocusSession(session.session_id)}
                     mirrorVideo={session === selfSession && mirrorSelfVideo}
                     aspectRatio={session === otherSession && !session.video ? '16/9' : ''}
                 />
@@ -1035,12 +1144,15 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
 
                     { !ringing && otherProfile && otherSession &&
                     <VideoProfile
+                        onClick={() => this.onFocusSession(otherSession.session_id)}
                         stream={this.state.otherVideoStream}
                         profile={otherProfile}
                         profileName={getUserDisplayName(profile)}
                         isMuted={!otherSession.unmuted}
                         hasVideo={Boolean(otherSession.video)}
-                        isSpeaking={Boolean(otherSession.voice)}
+                        isSpeaking={isSessionSpeaking(otherSession, this.props.localSpeaking)}
+                        isLive={this.props.screenSharingSession?.session_id === otherSession.session_id}
+                        volumeUserID={otherProfile.id}
                         mirrorVideo={false}
                         width={'100%'}
                     />
@@ -1048,12 +1160,14 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
 
                     { selfProfile && selfSession &&
                     <VideoProfile
+                        onClick={() => this.onFocusSession(selfSession.session_id)}
                         stream={this.state.selfVideoStream}
                         profile={selfProfile}
                         profileName={`${getUserDisplayName(selfProfile)} ${formatMessage({defaultMessage: '(you)'})}`}
                         isMuted={!selfSession.unmuted}
                         hasVideo={Boolean(selfSession.video)}
-                        isSpeaking={Boolean(selfSession.voice)}
+                        isSpeaking={isSessionSpeaking(selfSession, this.props.localSpeaking)}
+                        isLive={this.props.screenSharingSession?.session_id === selfSession.session_id}
                         mirrorVideo={mirrorSelfVideo}
                         width={'100%'}
                     />
@@ -1068,7 +1182,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                 $height={`calc(100vh - ${shouldRenderTopVideoContainer ? 220 : 124}px)`}
             >
                 {this.state.viewState === 'speaker' && renderSpeakerView()}
-                {this.state.viewState === 'grid' && !this.props.screenSharingSession && renderGridView()}
+                {this.state.viewState === 'grid' && !this.isShowingScreenPlayer() && renderGridView()}
             </VideoProfilesContainer>
         );
     };
@@ -1139,6 +1253,14 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                     />
                     {msg}
                 </span>
+                {!isSharing &&
+                    <StreamActions
+                        onDark={true}
+                        showFullscreen={false}
+                        getVideo={() => this.screenPlayer}
+                        onStopWatching={this.onStopWatchingStream}
+                    />
+                }
             </div>
         );
     };
@@ -1257,6 +1379,10 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
 
         let muteTooltipText = isMuted ? formatMessage({defaultMessage: 'Unmute'}) : formatMessage({defaultMessage: 'Mute'});
         let muteTooltipSubtext = isMuted ? formatMessage({defaultMessage: 'Or hold space bar'}) : '';
+        if (isPushToTalkActive()) {
+            muteTooltipText = formatMessage({defaultMessage: 'Push to talk is on'});
+            muteTooltipSubtext = formatMessage({defaultMessage: 'Hold {key} to talk'}, {key: keyCodeLabel(getPushToTalkConfig().code)});
+        }
 
         if (noInputDevices) {
             muteTooltipText = formatMessage(CallAlertConfigs.missingAudioInput.tooltipText!);
@@ -1314,9 +1440,10 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
         const SwitchViewIcon = this.state.viewState === 'speaker' ? SpeakerViewIcon : GridViewIcon;
 
         const shouldRenderVideoContainer = this.props.currentSession?.video || this.props.otherSessions.some((s) => s.video);
+        const showLiveCard = this.streamViewState() === 'live-card';
 
         const hasOtherParticipant = this.props.otherSessions.length > 0 || this.isRingingCallee();
-        const shouldRenderTopVideoContainer = (this.state.viewState === 'speaker' || this.props.screenSharingSession) && ((this.props.currentSession?.video && hasOtherParticipant) || this.props.otherSessions.some((s) => s.video));
+        const shouldRenderTopVideoContainer = (this.state.viewState === 'speaker' || this.isShowingScreenPlayer()) && ((this.props.currentSession?.video && hasOtherParticipant) || this.props.otherSessions.some((s) => s.video));
 
         return (
             <div
@@ -1330,6 +1457,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                 }}
             >
                 <div style={this.style.main}>
+                    <SpeakingSync/>
                     {this.renderAlertBanner()}
 
                     <div
@@ -1342,7 +1470,7 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                         <div style={this.style.headerSpreader}/>
                         <ExpandedIncomingCallContainer/>
 
-                        { this.props.enableVideo && !this.props.screenSharingSession && shouldRenderVideoContainer && this.props.otherSessions.length > 0 &&
+                        { this.props.enableVideo && !this.isShowingScreenPlayer() && shouldRenderVideoContainer && this.props.otherSessions.length > 0 &&
                         <OverlayTrigger
                             placement='bottom'
                             key={'switch-view'}
@@ -1393,7 +1521,9 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
 
                     {shouldRenderTopVideoContainer && this.renderTopVideoContainer()}
 
-                    {!this.props.screenSharingSession && !shouldRenderVideoContainer && this.props.currentSession && this.props.channel &&
+                    {showLiveCard && shouldRenderVideoContainer && this.renderLiveCard(true)}
+
+                    {!this.isShowingScreenPlayer() && !shouldRenderVideoContainer && this.props.currentSession && this.props.channel &&
                         <ParticipantsGrid
                             callID={this.props.channel.id}
                             callHostID={this.props.callHostID}
@@ -1402,12 +1532,17 @@ export default class ExpandedView extends React.PureComponent<Props, State> {
                             profiles={this.props.profiles}
                             sessions={this.props.sessions}
                             onParticipantRemove={this.onRemove}
+                            liveStream={showLiveCard && this.props.screenSharingSession ? {
+                                sessionID: this.props.screenSharingSession.session_id,
+                                profile: this.props.profiles[this.props.screenSharingSession.user_id],
+                                onWatch: this.onWatchStream,
+                            } : undefined}
                         />
                     }
 
-                    {!this.props.screenSharingSession && shouldRenderVideoContainer && this.renderVideoContainer()}
+                    {!this.isShowingScreenPlayer() && shouldRenderVideoContainer && this.renderVideoContainer()}
 
-                    {this.props.screenSharingSession && this.renderScreenSharingPlayer()}
+                    {this.isShowingScreenPlayer() && this.renderScreenSharingPlayer()}
 
                     {this.state.showLiveCaptions &&
                         <LiveCaptionsOverlay>
@@ -1929,7 +2064,7 @@ const VideoProfilesContainer = styled.div<{$height: string}>`
     `}
 `;
 
-const VideoProfileContainer = styled.div<{$width?: string, $aspectRatio?: string}>`
+const VideoProfileContainer = styled.div<{$width?: string, $aspectRatio?: string, $speaking?: boolean, $clickable?: boolean}>`
   display: flex;
   position: relative;
   align-items: center;
@@ -1939,6 +2074,23 @@ const VideoProfileContainer = styled.div<{$width?: string, $aspectRatio?: string
   height: 100%;
   max-height: 100%;
   max-width: 100%;
+
+  // Same green ring as on the avatars; the avatar glow is not visible over a video.
+  box-shadow: ${({$speaking}) => ($speaking ? `0 0 0 3px ${SPEAKING_RING_COLOR}` : 'none')};
+
+  ${({$clickable}) => $clickable && css`
+    cursor: pointer;
+  `}
+
+  .videoProfileVolume {
+    opacity: 0;
+    transition: opacity 0.1s;
+  }
+
+  &:hover .videoProfileVolume,
+  &:focus-within .videoProfileVolume {
+    opacity: 1;
+  }
 
   ${({$aspectRatio}) => $aspectRatio && css`
     aspect-ratio: ${$aspectRatio};
@@ -1958,6 +2110,19 @@ const VideoProfilePlayer = styled.video<{$mirror: boolean}>`
   ${({$mirror}) => $mirror && css`
     transform: scaleX(-1);
   `}
+`;
+
+const VideoProfileLive = styled.div`
+  position: absolute;
+  top: 8px;
+  left: 8px;
+`;
+
+const VideoProfileVolume = styled.div`
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
 `;
 
 const VideoProfileState = styled.div`
@@ -1990,6 +2155,13 @@ type VideoProfileProps = {
     aspectRatio?: string;
     ringing?: boolean;
     testID?: string;
+    isLive?: boolean;
+
+    // Remote user whose local volume can be adjusted from this card.
+    volumeUserID?: string;
+
+    // Click enlarges the card (or swaps it with the big one).
+    onClick?: () => void;
 };
 
 const VideoProfile = (props: VideoProfileProps) => {
@@ -2007,15 +2179,17 @@ const VideoProfile = (props: VideoProfileProps) => {
         <VideoProfileContainer
             $width={props.width}
             $aspectRatio={props.aspectRatio}
+            $speaking={props.isSpeaking}
+            $clickable={Boolean(props.onClick)}
             data-testid={props.testID}
+            onClick={props.onClick}
         >
             {!props.hasVideo &&
             <Avatar
                 size={80}
                 border={false}
                 url={Client4.getProfilePictureUrl(props.profile.id, props.profile.last_picture_update)}
-                borderGlowWidth={props.isSpeaking ? 3 : 0}
-                borderGlowColor='white'
+                {...speakingRing(props.isSpeaking)}
                 className={props.ringing ? 'pulsingAnimation' : ''}
             />
             }
@@ -2027,6 +2201,22 @@ const VideoProfile = (props: VideoProfileProps) => {
                 muted={true}
                 $mirror={props.mirrorVideo}
             />
+            }
+
+            {props.isLive &&
+            <VideoProfileLive>
+                <LiveBadge/>
+            </VideoProfileLive>
+            }
+
+            {props.volumeUserID &&
+            <VideoProfileVolume className='videoProfileVolume'>
+                <UserVolumeButton
+                    userID={props.volumeUserID}
+                    name={getUserDisplayName(props.profile)}
+                    placement='bottom-end'
+                />
+            </VideoProfileVolume>
             }
 
             {props.isMuted &&

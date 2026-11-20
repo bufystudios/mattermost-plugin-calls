@@ -8,6 +8,7 @@ import classNames from 'classnames';
 import React from 'react';
 import {useIntl} from 'react-intl';
 import Avatar from 'src/components/avatar/avatar';
+import {speakingRing} from 'src/components/avatar/speaking_ring';
 import {HostBadge} from 'src/components/badge';
 import DotMenu, {DotMenuButton} from 'src/components/dot_menu/dot_menu';
 import {Emoji} from 'src/components/emoji/emoji';
@@ -17,7 +18,9 @@ import HandEmoji from 'src/components/icons/hand';
 import MutedIcon from 'src/components/icons/muted_icon';
 import {ThreeDotsButton} from 'src/components/icons/three_dots';
 import UnmutedIcon from 'src/components/icons/unmuted_icon';
+import LiveBadge from 'src/components/live_badge';
 import {useHostControls} from 'src/components/use_host_controls';
+import {UserVolumeButton} from 'src/components/user_volume_control';
 import styled from 'styled-components';
 
 export enum TileSize {
@@ -25,6 +28,9 @@ export enum TileSize {
     Medium,
     Large,
     ExtraLarge,
+
+    // Not picked by the grid's auto sizing: used for the enlarged (focused) tile.
+    Focused,
 }
 
 export type Props = {
@@ -44,6 +50,13 @@ export type Props = {
     sessionID: string,
     onRemove: () => void,
     isSharingScreen?: boolean,
+
+    // Click on the tile (enlarge / shrink it). Not set in the recorder view.
+    onFocusToggle?: () => void,
+    focused?: boolean,
+
+    // Local volume button, shown for remote participants on hover.
+    showVolume?: boolean,
 }
 
 export const tileSizePropsMap = {
@@ -87,6 +100,16 @@ export const tileSizePropsMap = {
         iconSize: 24,
         dotMenuIconSize: 20,
     },
+    [TileSize.Focused]: {
+        avatarSize: 240,
+        fontSize: 16,
+        lineHeight: 24,
+        gap: 16,
+        padding: 32,
+        iconPadding: 10,
+        iconSize: 28,
+        dotMenuIconSize: 20,
+    },
 };
 
 export default function ParticipantCell({
@@ -106,6 +129,9 @@ export default function ParticipantCell({
     sessionID,
     onRemove,
     isSharingScreen = false,
+    onFocusToggle,
+    focused = false,
+    showVolume = false,
 }: Props) {
     const {formatMessage} = useIntl();
     const {hoverOn, hoverOff, onOpenChange, hostControlsAvailable, showHostControls} = useHostControls(isYou, isHost, iAmHost);
@@ -123,7 +149,7 @@ export default function ParticipantCell({
                     size={tileSizePropsMap[size].avatarSize}
                     fontSize={tileSizePropsMap[size].fontSize}
                     border={false}
-                    borderGlowWidth={isSpeaking ? 3 : 0}
+                    {...speakingRing(isSpeaking)}
                     url={pictureURL}
                 />
 
@@ -173,7 +199,24 @@ export default function ParticipantCell({
             </span>
 
             {isHost && showHostBadge && <HostBadge data-testid={'host-badge'}/>}
+            {isSharingScreen && <LiveBadge/>}
         </>
+    );
+
+    const focusProps = onFocusToggle ? {
+        onClick: onFocusToggle,
+        'data-focused': focused,
+        'data-testid': 'participant-cell-focusable',
+        title: focused ? formatMessage({defaultMessage: 'Back to grid'}) : formatMessage({defaultMessage: 'Enlarge'}),
+    } : {};
+
+    const volumeButton = showVolume && (
+        <VolumeButtonWrap className='tileVolume'>
+            <UserVolumeButton
+                userID={userID}
+                name={name}
+            />
+        </VolumeButtonWrap>
     );
 
     if (hostControlsAvailable) {
@@ -187,7 +230,9 @@ export default function ParticipantCell({
                 }}
                 onMouseEnter={hoverOn}
                 onMouseLeave={hoverOff}
+                {...focusProps}
             >
+                {volumeButton}
                 {showHostControls &&
                     <StyledDotMenu
                         icon={
@@ -229,11 +274,20 @@ export default function ParticipantCell({
                 padding: `${tileSizePropsMap[size].padding}px`,
                 gap: `${tileSizePropsMap[size].gap}px`,
             }}
+            {...focusProps}
         >
+            {volumeButton}
             {innerParticipant}
         </li>
     );
 }
+
+const VolumeButtonWrap = styled.div`
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 1;
+`;
 
 const MuteIconWrapper = styled.div<{$isMuted: boolean, $padding: number, $size: number}>`
   position: absolute;

@@ -1037,9 +1037,12 @@ export default class CallsClient extends EventEmitter {
         screenTrack.contentHint = 'motion';
 
         // Always send a fallback track (VP8 encoded) for receivers that don't yet support AV1.
-        // Index 0 of the opts array maps to the video track (audio ignores encodings).
+        // addStream maps opts by getTracks() index, and Chromium lists audio
+        // tracks before video, so build opts per track instead of assuming index 0.
         // Without explicit encodings calls-common caps screen tracks at 1Mbps/10fps.
-        await this.peer.addStream(screenStream, [{encodings: [{...screenEncodingsVP8}]}]);
+        await this.peer.addStream(screenStream, screenStream.getTracks().map((t) => (
+            t.kind === 'video' ? {encodings: [{...screenEncodingsVP8}]} : undefined
+        )) as Parameters<RTCPeer['addStream']>[1]);
 
         if (this.config.enableAV1 && this.av1Codec) {
             logDebug(`AV1 supported, sending track: ${this.av1Codec}`);
